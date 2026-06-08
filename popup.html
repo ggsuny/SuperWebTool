@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Page Inline Translator</title>
+    <link rel="stylesheet" href="src/popup.css">
+  </head>
+  <body>
+    <main class="app">
+      <header class="header">
+        <div>
+          <h1>页面阅读助手</h1>
+          <p>翻译、总结、笔记保存到本地。</p>
+        </div>
+        <span id="statusDot" class="status-dot" title="状态"></span>
+      </header>
+
+      <nav class="tabs" aria-label="功能">
+        <button class="tab is-active" data-tab="translate" type="button">🌐 翻译</button>
+        <button class="tab" data-tab="summary" type="button">🧭 总结</button>
+        <button class="tab" data-tab="ask" type="button">💬 Ask</button>
+        <button class="tab" data-tab="notes" type="button">📝 笔记</button>
+        <button class="tab" data-tab="settings" type="button">⚙️ 设置</button>
+      </nav>
+
+      <section class="tab-panel is-active" data-panel="translate">
+        <section class="panel">
+          <label class="field">
+            <span>翻译模式</span>
+            <select id="mode">
+              <option value="append">段落下方增加中文</option>
+              <option value="replace">替换原文</option>
+            </select>
+          </label>
+
+          <label class="field">
+            <span>译文样式</span>
+            <select id="translationStyle">
+              <option value="bar">左侧竖线</option>
+              <option value="dashed-box">虚线方框</option>
+              <option value="highlight">浅色高亮</option>
+              <option value="top-line">顶部细线</option>
+              <option value="bubble">圆角气泡</option>
+            </select>
+          </label>
+        </section>
+
+        <section class="actions">
+          <button id="translateBtn" class="primary">翻译当前页面</button>
+          <button id="restoreBtn" class="secondary">恢复原文</button>
+        </section>
+      </section>
+
+      <section class="tab-panel" data-panel="summary">
+        <section class="panel">
+          <label class="field">
+            <span>总结注意点</span>
+            <textarea id="summaryPrompt" rows="5" placeholder="例如：重点关注市场观点、风险、作者给出的建议。"></textarea>
+          </label>
+        </section>
+
+        <section class="actions single">
+          <button id="summaryBtn" class="primary">生成右侧总结</button>
+        </section>
+
+        <section class="summary-card is-empty" id="summaryCard">
+          <div class="summary-card-header">
+            <strong>总结结果</strong>
+            <button id="summaryToggleBtn" class="link-button" type="button">展开</button>
+          </div>
+          <div id="summaryResult" class="summary-result">生成后会显示在这里。</div>
+        </section>
+      </section>
+
+      <section class="tab-panel" data-panel="ask">
+        <section class="summary-card">
+          <div class="summary-card-header">
+            <strong>文章脉络</strong>
+            <button id="askOverviewBtn" class="link-button" type="button">刷新</button>
+          </div>
+          <div id="askOverview" class="summary-result compact markdown-body">进入 Ask 后会展示文章架构、观点和数据。</div>
+        </section>
+
+        <section class="ask-chat" id="askMessages" aria-label="问答记录"></section>
+
+        <section class="panel ask-box">
+          <label class="field">
+            <textarea id="askQuestion" rows="1" placeholder="基于这篇文章提一个问题。按 Enter 发送"></textarea>
+          </label>
+          <label class="inline-check">
+            <input id="allowWebSearch" type="checkbox">
+            文章不足时允许联网搜索
+          </label>
+        </section>
+
+        <section class="actions single">
+          <button id="askBtn" class="primary">提问</button>
+        </section>
+      </section>
+
+      <section class="tab-panel" data-panel="notes">
+        <section class="panel">
+          <label class="field">
+            <span>我的笔记</span>
+            <textarea id="userNote" rows="7" placeholder="写下你的理解、摘录、待办或问题。"></textarea>
+          </label>
+
+          <div class="check-grid" aria-label="保存内容">
+            <label><input id="saveUrl" type="checkbox"> 原始链接</label>
+            <label><input id="saveOriginal" type="checkbox"> 网页英文</label>
+            <label><input id="saveTranslation" type="checkbox"> 中文翻译</label>
+            <label><input id="saveSummary" type="checkbox"> 总结内容</label>
+            <label><input id="saveNote" type="checkbox"> 我的笔记</label>
+          </div>
+        </section>
+
+        <section class="actions single">
+          <button id="saveNoteBtn" class="primary">保存 Markdown</button>
+        </section>
+      </section>
+
+      <section class="tab-panel" data-panel="settings">
+        <section class="panel">
+          <label class="field">
+            <span>翻译后端</span>
+            <select id="provider">
+              <option value="ollama">本地 Ollama</option>
+              <option value="openaiCompatible">OpenAI-compatible API</option>
+            </select>
+          </label>
+
+          <label class="field">
+            <span>模型</span>
+            <select id="ollamaModel"></select>
+            <input id="model" placeholder="qwen3.5:4b">
+          </label>
+
+          <label class="field">
+            <span>API Base URL</span>
+            <input id="baseUrl" placeholder="http://localhost:11434">
+          </label>
+
+          <label class="field api-key-field">
+            <span>API Key</span>
+            <input id="apiKey" type="password" placeholder="仅在线 API 需要">
+          </label>
+
+          <label class="field">
+            <span>Markdown 保存目录</span>
+            <input id="saveDir" placeholder="page-notes">
+          </label>
+          <p class="hint">保存目录是“下载”文件夹下的子目录，例如 page-notes/citadel。</p>
+        </section>
+      </section>
+
+      <p id="message" class="message"></p>
+    </main>
+    <script src="src/popup.js" type="module"></script>
+  </body>
+</html>

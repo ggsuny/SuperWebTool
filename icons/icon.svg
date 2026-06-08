@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Translator icon">
+  <rect width="128" height="128" rx="24" fill="#1f6feb"/>
+  <path fill="#fff" d="M30 30h43v12H57c-2 10-6 19-12 27 5 4 11 8 18 11l-6 10c-7-4-14-8-20-13-5 5-11 10-18 14l-6-10c6-3 12-7 17-12-4-5-8-11-11-18l10-4c2 5 5 10 8 14 4-6 7-12 9-19H30V30z"/>
+  <path fill="#fff" d="M85 48h12l24 50h-13l-5-11H79l-5 11H61l24-50zm14 29-8-18-8 18h16z"/>
+</svg>

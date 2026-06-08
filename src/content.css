@@ -1,0 +1,730 @@
+/* ── 基础与渐显动画 ── */
+@keyframes pitFadeIn {
+  from {
+    opacity: 0;
+    filter: blur(1px);
+    transform: translateY(2px);
+  }
+  to {
+    opacity: 1; /* 具体 opacity 将由具体样式或 data-state 控制 */
+    filter: blur(0);
+    transform: translateY(0);
+  }
+}
+
+.pit-translation {
+  animation: pitFadeIn 0.35s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  transition: opacity 0.3s ease, background-color 0.3s ease, border-color 0.3s ease;
+  font-size: var(--pit-translation-font-size, 100%) !important;
+  line-height: var(--pit-translation-line-height, 1.4) !important;
+  white-space: pre-wrap;
+}
+
+/* ── 翻译块：加载中状态 ── */
+.pit-translation[data-state="loading"] {
+  opacity: 0.45 !important;
+  font-style: italic;
+}
+
+.pit-translation[data-state="waiting"] {
+  opacity: 0.6 !important;
+  font-style: italic;
+}
+
+/* ══════════════════════════════════════
+   样式 1（默认）：左侧实线竖线
+   ══════════════════════════════════════ */
+.pit-translation[data-pit-style="bar"],
+.pit-translation:not([data-pit-style]) {
+  display: block;
+  box-sizing: border-box;
+  margin-top: 0.45em;
+  padding-left: 0.75em;
+  border-left: 3px solid color-mix(in srgb, currentColor 35%, transparent);
+  color: inherit;
+  font: inherit;
+  line-height: var(--pit-translation-line-height, 1.4) !important;
+  opacity: 0.86;
+}
+
+/* ══════════════════════════════════════
+   样式 2：虚线方框
+   ══════════════════════════════════════ */
+.pit-translation[data-pit-style="dashed-box"] {
+  display: block;
+  box-sizing: border-box;
+  margin-top: 0.5em;
+  padding: 0.4em 0.7em;
+  border: 1.5px dashed color-mix(in srgb, currentColor 40%, transparent);
+  border-radius: 4px;
+  color: inherit;
+  font: inherit;
+  line-height: var(--pit-translation-line-height, 1.4) !important;
+  opacity: 0.88;
+}
+
+/* ══════════════════════════════════════
+   样式 3：浅色高亮背景（类纸质感）
+   ══════════════════════════════════════ */
+.pit-translation[data-pit-style="highlight"] {
+  display: block;
+  box-sizing: border-box;
+  margin-top: 0.4em;
+  padding: 0.3em 0.6em;
+  border-radius: 3px;
+  background: color-mix(in srgb, currentColor 8%, transparent);
+  color: inherit;
+  font: inherit;
+  line-height: var(--pit-translation-line-height, 1.4) !important;
+  opacity: 0.9;
+}
+
+/* ══════════════════════════════════════
+   样式 4：上方细分隔线（简洁款）
+   ══════════════════════════════════════ */
+.pit-translation[data-pit-style="top-line"] {
+  display: block;
+  box-sizing: border-box;
+  margin-top: 0.5em;
+  padding-top: 0.4em;
+  border-top: 1px solid color-mix(in srgb, currentColor 25%, transparent);
+  color: inherit;
+  font: inherit;
+  font-size: 0.95em;
+  line-height: var(--pit-translation-line-height, 1.4) !important;
+  opacity: 0.82;
+}
+
+/* ══════════════════════════════════════
+   样式 5：圆角气泡（贴纸感）
+   ══════════════════════════════════════ */
+.pit-translation[data-pit-style="bubble"] {
+  display: inline-block;
+  box-sizing: border-box;
+  margin-top: 0.45em;
+  padding: 0.25em 0.65em;
+  border: 1px solid color-mix(in srgb, currentColor 20%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, currentColor 6%, transparent);
+  color: inherit;
+  font: inherit;
+  font-size: 0.93em;
+  line-height: var(--pit-translation-line-height, 1.4) !important;
+  opacity: 0.88;
+}
+
+/* ── replace 模式：替换原文样式 ── */
+.pit-replaced {
+  color: inherit;
+  font: inherit;
+  font-size: var(--pit-translation-font-size, 100%) !important;
+  line-height: var(--pit-translation-line-height, 1.4) !important;
+  white-space: pre-wrap;
+}
+
+/* ── 页面内 Ask 面板 ── */
+.pit-ask-panel {
+  position: fixed;
+  z-index: 2147483647;
+  top: 72px;
+  right: 16px;
+  display: grid;
+  grid-template-rows: auto auto 1fr auto;
+  width: min(390px, calc(100vw - 24px));
+  height: min(620px, calc(100vh - 96px));
+  min-width: 320px;
+  min-height: 360px;
+  max-width: calc(100vw - 24px);
+  max-height: calc(100vh - 24px);
+  border: 1px solid rgba(35, 38, 47, 0.14);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.97);
+  color: #1f2933;
+  box-shadow: 0 16px 48px rgba(15, 23, 42, 0.2);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  overflow: hidden;
+  resize: none;
+  overscroll-behavior: contain;
+  backdrop-filter: blur(10px);
+}
+
+.pit-ask-panel.is-dragging,
+.pit-ask-panel.is-resizing {
+  user-select: none;
+}
+
+.pit-ask-panel[hidden] {
+  display: none !important;
+}
+
+.pit-reader-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  border-bottom: 1px solid rgba(35, 38, 47, 0.1);
+  cursor: grab;
+  touch-action: none;
+}
+
+.pit-ask-panel.is-dragging .pit-reader-header {
+  cursor: grabbing;
+}
+
+.pit-panel-resize-handle {
+  position: absolute;
+  z-index: 2;
+  background: transparent;
+  touch-action: none;
+}
+
+.pit-panel-resize-handle.is-n,
+.pit-panel-resize-handle.is-s {
+  left: 12px;
+  right: 12px;
+  height: 8px;
+  cursor: ns-resize;
+}
+
+.pit-panel-resize-handle.is-n {
+  top: -4px;
+}
+
+.pit-panel-resize-handle.is-s {
+  bottom: -4px;
+}
+
+.pit-panel-resize-handle.is-e,
+.pit-panel-resize-handle.is-w {
+  top: 12px;
+  bottom: 12px;
+  width: 8px;
+  cursor: ew-resize;
+}
+
+.pit-panel-resize-handle.is-e {
+  right: -4px;
+}
+
+.pit-panel-resize-handle.is-w {
+  left: -4px;
+}
+
+.pit-panel-resize-handle.is-ne,
+.pit-panel-resize-handle.is-nw,
+.pit-panel-resize-handle.is-se,
+.pit-panel-resize-handle.is-sw {
+  width: 16px;
+  height: 16px;
+}
+
+.pit-panel-resize-handle.is-ne {
+  top: -5px;
+  right: -5px;
+  cursor: nesw-resize;
+}
+
+.pit-panel-resize-handle.is-nw {
+  top: -5px;
+  left: -5px;
+  cursor: nwse-resize;
+}
+
+.pit-panel-resize-handle.is-se {
+  right: -5px;
+  bottom: -5px;
+  cursor: nwse-resize;
+}
+
+.pit-panel-resize-handle.is-sw {
+  left: -5px;
+  bottom: -5px;
+  cursor: nesw-resize;
+}
+
+.pit-reader-header strong {
+  display: block;
+  font-size: 15px;
+  line-height: 1.25;
+}
+
+.pit-reader-status {
+  display: block;
+  margin-top: 2px;
+  color: #667085;
+  font-size: 12px;
+  line-height: 1.25;
+}
+
+.pit-reader-tabs {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 6px;
+  padding: 10px;
+  border-bottom: 1px solid rgba(35, 38, 47, 0.1);
+  background: #f8fafc;
+}
+
+.pit-reader-tab {
+  min-width: 0;
+  min-height: 40px;
+  padding: 7px 5px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: #52606d;
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.pit-reader-tab.is-active {
+  border-color: #c7d2fe;
+  background: #eef2ff;
+  color: #243b79;
+}
+
+.pit-reader-body {
+  min-height: 0;
+  overflow: hidden;
+  overscroll-behavior: contain;
+}
+
+.pit-reader-panel-section {
+  display: none;
+  height: 100%;
+  min-height: 0;
+  overflow: auto;
+  padding: 12px;
+  box-sizing: border-box;
+  overscroll-behavior: contain;
+}
+
+.pit-reader-panel-section.is-active {
+  display: block;
+}
+
+.pit-reader-panel-section[data-reader-panel="ask"].is-active {
+  display: block;
+  overflow: auto;
+  padding: 0;
+}
+
+.pit-reader-field {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 12px;
+  color: #344054;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.pit-reader-field input,
+.pit-reader-field select,
+.pit-reader-field textarea {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid #c9d2df;
+  border-radius: 8px;
+  padding: 8px 10px;
+  color: #182230;
+  background: #fff;
+  font: inherit;
+  font-weight: 500;
+  line-height: 1.45;
+}
+
+.pit-reader-field textarea {
+  resize: vertical;
+}
+
+.pit-note-field {
+  font-size: 13px;
+}
+
+.pit-panel-note {
+  min-height: 220px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace !important;
+  font-size: 13px !important;
+  line-height: 1.45 !important;
+}
+
+.pit-note-render {
+  min-height: 220px;
+  box-sizing: border-box;
+  border: 1px solid #c9d2df;
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: #fff;
+  color: #182230;
+  font-size: 13px;
+  line-height: 1.45;
+  cursor: text;
+}
+
+.pit-note-render[hidden] {
+  display: none;
+}
+
+.pit-reader-range-field span {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.pit-reader-range-field strong {
+  color: #1f6feb;
+  font-size: 12px;
+}
+
+.pit-reader-field input[type="range"] {
+  padding: 0;
+  border: 0;
+  accent-color: #1f6feb;
+}
+
+.pit-reader-help {
+  color: #667085;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.35;
+}
+
+.pit-reader-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 2px 0 12px;
+  color: #344054;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.pit-reader-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.pit-reader-primary,
+.pit-reader-secondary {
+  min-height: 34px;
+  padding: 7px 11px;
+  border-radius: 8px;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 750;
+}
+
+.pit-reader-primary {
+  border: 0;
+  color: #fff;
+  background: #1f6feb;
+}
+
+.pit-reader-secondary {
+  border: 1px solid #c9d2df;
+  color: #344054;
+  background: #fff;
+}
+
+.pit-reader-secondary:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
+.pit-tweet-source {
+  min-height: 150px;
+}
+
+.pit-tweet-result {
+  min-height: 118px;
+  margin-top: 12px;
+  box-sizing: border-box;
+  border: 1px solid #d8dee8;
+  border-radius: 8px;
+  padding: 10px 11px;
+  background: #fff;
+  color: #182230;
+  font-size: 14px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+
+.pit-tweet-result.is-loading {
+  color: #667085;
+}
+
+.pit-reader-checks {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin: 4px 0 12px;
+  color: #344054;
+  font-size: 12px;
+}
+
+.pit-ask-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  border-bottom: 1px solid rgba(35, 38, 47, 0.1);
+}
+
+.pit-ask-close {
+  width: 26px;
+  height: 26px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #52606d;
+  cursor: pointer;
+  font: inherit;
+  font-size: 20px;
+  line-height: 22px;
+}
+
+.pit-ask-close:hover {
+  background: rgba(15, 23, 42, 0.08);
+}
+
+.pit-ask-overview {
+  padding: 10px 12px;
+  border-bottom: 1px solid rgba(35, 38, 47, 0.1);
+  background: #f8fafc;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.pit-ask-messages {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+}
+
+.pit-ask-message {
+  width: fit-content;
+  max-width: 88%;
+  padding: 9px 10px;
+  border: 1px solid #d8dee8;
+  border-radius: 12px;
+  background: #fff;
+  color: #344054;
+  white-space: normal;
+}
+
+.pit-ask-message.is-user {
+  align-self: flex-end;
+  border-color: #b7d4ff;
+  background: #eef6ff;
+  color: #18345f;
+}
+
+.pit-ask-message.is-assistant {
+  align-self: flex-start;
+}
+
+.pit-ask-message-label {
+  margin-bottom: 3px;
+  color: #7b8794;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.pit-ask-message-body p,
+.pit-ask-overview p {
+  margin: 4px 0;
+}
+
+.pit-ask-message-body h3,
+.pit-ask-overview h3 {
+  margin: 8px 0 5px;
+  font-size: 13px;
+}
+
+.pit-ask-message-body h1,
+.pit-ask-overview h1,
+.pit-ask-message-body h2,
+.pit-ask-overview h2 {
+  margin: 8px 0 5px;
+  font-size: 13px;
+}
+
+.pit-ask-message-body ul,
+.pit-ask-overview ul,
+.pit-ask-message-body ol,
+.pit-ask-overview ol {
+  margin: 5px 0;
+  padding-left: 20px;
+}
+
+.pit-ask-message-body li,
+.pit-ask-overview li {
+  margin: 3px 0;
+}
+
+.pit-ask-composer {
+  position: relative;
+  padding: 8px 10px 10px;
+  border-top: 1px solid rgba(35, 38, 47, 0.1);
+  background: rgba(255, 255, 255, 0.98);
+}
+
+.pit-ask-input {
+  width: 100%;
+  min-height: 30px;
+  max-height: 84px;
+  box-sizing: border-box;
+  resize: none;
+  border: 1px solid #c9d2df;
+  border-radius: 16px;
+  padding: 6px 40px 6px 11px;
+  color: #182230;
+  background: #fff;
+  font: inherit;
+  line-height: 1.25;
+}
+
+.pit-ask-send {
+  position: absolute;
+  right: 15px;
+  bottom: 15px;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  min-height: 0;
+  padding: 0 0 1px 1px;
+  border: 0;
+  border-radius: 999px;
+  color: #fff;
+  background: #1f6feb;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.pit-selection-toolbar {
+  position: absolute;
+  z-index: 2147483647;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 104px;
+  height: 30px;
+  box-sizing: border-box;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  background: #1f2430;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.38), 0 2px 8px rgba(0, 0, 0, 0.22);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.pit-manual-mark[data-pit-mark-style="highlight"] {
+  background: #fff2a8;
+  box-shadow: inset 0 -0.22em 0 rgba(255, 210, 64, 0.72);
+}
+
+.pit-manual-mark[data-pit-mark-style="bold"] {
+  font-weight: 800;
+}
+
+.pit-manual-mark[data-pit-mark-style="italic"] {
+  font-style: italic;
+}
+
+.pit-manual-mark[data-pit-mark-style="boldItalic"] {
+  font-weight: 800;
+  font-style: italic;
+}
+
+.pit-manual-mark[data-pit-mark-style="code"] {
+  padding: 0.08em 0.28em;
+  border-radius: 4px;
+  background: rgba(15, 23, 42, 0.08);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+}
+
+.pit-selection-toolbar[hidden] {
+  display: none;
+}
+
+.pit-selection-action {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  min-height: 0;
+  border: 0;
+  border-radius: 4px;
+  padding: 0;
+  color: #f8fafc;
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+}
+
+.pit-selection-action:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.pit-selection-action:hover::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 8px);
+  transform: translateX(-50%);
+  width: max-content;
+  max-width: 120px;
+  padding: 4px 7px;
+  border-radius: 5px;
+  background: rgba(17, 24, 39, 0.96);
+  color: #fff;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.22);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.2;
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+.pit-selection-action:hover::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 3px);
+  transform: translateX(-50%);
+  border: 5px solid transparent;
+  border-top-color: rgba(17, 24, 39, 0.96);
+  pointer-events: none;
+}
+
+.pit-selection-action svg {
+  width: 17px;
+  height: 17px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.pit-selection-accent {
+  stroke: #f2c94c;
+  stroke-width: 2.6;
+}
