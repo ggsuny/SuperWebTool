@@ -2,6 +2,10 @@
 
 ## 2026-06-08
 
+- Allowed manual marking on non-translated page content, not only translated text.
+- Auto-sent marked non-translated content to Notes when the setting is enabled.
+- Rendered manual marks with the configured highlight color plus underline on the page.
+- Saved auto-sent marked content to Notes as Markdown-compatible HTML with color and underline.
 - Changed panel opening behavior so it always appears on the right side and no longer restores the last dragged position.
 - Kept panel size persistence while removing saved position persistence.
 - Added a setting to automatically send manually marked translated text to Notes; enabled by default.

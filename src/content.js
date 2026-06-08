@@ -447,7 +447,7 @@ function applyTranslationTypographyToPage(settings = {}) {
 
 function applyMarkColorToPage(settings = {}) {
   const color = settings.markHighlightColor || DEFAULT_OLLAMA.markHighlightColor;
-  document.querySelectorAll('.pit-manual-mark[data-pit-mark-style="highlight"]').forEach((node) => {
+  document.querySelectorAll(".pit-manual-mark").forEach((node) => {
     node.style.setProperty("--pit-mark-highlight-color", color);
   });
 }
@@ -1324,8 +1324,7 @@ async function markSelectedTranslationText() {
   const container = range.commonAncestorContainer instanceof Element
     ? range.commonAncestorContainer
     : range.commonAncestorContainer.parentElement;
-  const translationRoot = container?.closest?.(`.${TRANSLATION_CLASS}, .${REPLACED_CLASS}`);
-  if (!translationRoot) {
+  if (container?.closest?.(`.${ASK_PANEL_CLASS}, .${SELECTION_TOOLBAR_CLASS}, textarea, input, select, button`)) {
     hideSelectionToolbar();
     return;
   }
@@ -1339,7 +1338,7 @@ async function markSelectedTranslationText() {
     mark.appendChild(content);
     range.insertNode(mark);
     selection.removeAllRanges();
-    setPanelStatus(document.querySelector(`.${ASK_PANEL_CLASS}`), "已标记选中译文。");
+    setPanelStatus(document.querySelector(`.${ASK_PANEL_CLASS}`), "已标记选中内容。");
     if (settings.autoSendMarkedToNote !== false) {
       appendMarkedTextToNote(selectedText, settings);
     }
@@ -1353,9 +1352,22 @@ async function markSelectedTranslationText() {
 function appendMarkedTextToNote(text, settings = undefined) {
   const selected = normalizeSelectedText(text);
   if (!selected) return;
-  const style = settings?.markStyle || DEFAULT_OLLAMA.markStyle;
-  const marked = wrapMarkedMarkdown(escapeMarkdownInline(selected), style);
+  const marked = wrapMarkedNoteMarkdown(selected, settings);
   appendMarkdownLineToNote(`- ${marked}`, settings, "已标记并发送到笔记，草稿已自动保存。");
+}
+
+function wrapMarkedNoteMarkdown(text, settings = {}) {
+  const style = settings?.markStyle || DEFAULT_OLLAMA.markStyle;
+  const color = normalizeColor(settings?.markHighlightColor || DEFAULT_OLLAMA.markHighlightColor);
+  const css = [
+    `background-color: ${color}`,
+    "text-decoration: underline",
+    "text-decoration-thickness: 1.5px",
+    style === "bold" || style === "boldItalic" ? "font-weight: 700" : "",
+    style === "italic" || style === "boldItalic" ? "font-style: italic" : "",
+    style === "code" ? 'font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace' : ""
+  ].filter(Boolean).join("; ");
+  return `<span style="${css}">${escapeHtml(text)}</span>`;
 }
 
 async function getCurrentPanelSettings() {

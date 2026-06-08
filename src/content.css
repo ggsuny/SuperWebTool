@@ -658,6 +658,13 @@
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
+.pit-manual-mark {
+  text-decoration: underline;
+  text-decoration-color: var(--pit-mark-highlight-color, #f5c542);
+  text-decoration-thickness: 1.5px;
+  text-underline-offset: 0.16em;
+}
+
 .pit-manual-mark[data-pit-mark-style="highlight"] {
   background: var(--pit-mark-highlight-color, #fff2a8);
   box-shadow: inset 0 -0.22em 0 rgba(255, 210, 64, 0.72);
