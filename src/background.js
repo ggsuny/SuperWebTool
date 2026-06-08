@@ -4,6 +4,7 @@ const DEFAULT_SETTINGS = {
   translationStyle: "bar",
   markStyle: "highlight",
   markHighlightColor: "#fff2a8",
+  autoSendMarkedToNote: true,
   translationFontSize: 100,
   translationLineHeight: 1.4,
   autoOpenPanel: true,

@@ -34,6 +34,7 @@ const DEFAULT_OLLAMA = {
   baseUrl:  "http://localhost:11434",
   markStyle: "highlight",
   markHighlightColor: "#fff2a8",
+  autoSendMarkedToNote: true,
   translationFontSize: 100,
   translationLineHeight: 1.4,
   autoOpenPanel: true
@@ -629,6 +630,7 @@ function openAskPanel(settings = {}) {
     '<label class="pit-reader-field pit-reader-range-field"><span>译文行距 <strong class="pit-line-height-value">1.4</strong></span><input class="pit-panel-line-height" type="range" min="1.1" max="1.9" step="0.05"></label>',
     '<label class="pit-reader-field"><span>标记样式</span><select class="pit-panel-mark-style"><option value="highlight">高亮 ==文字==</option><option value="bold">加粗 **文字**</option><option value="italic">斜体 *文字*</option><option value="boldItalic">加粗斜体 ***文字***</option><option value="code">代码 `文字`</option></select></label>',
     '<label class="pit-reader-field"><span>高亮颜色</span><input class="pit-panel-mark-color" type="color"></label>',
+    '<label class="pit-reader-toggle"><input class="pit-panel-mark-to-note" type="checkbox"> 标记后自动发送到笔记</label>',
     '<label class="pit-reader-toggle"><input class="pit-panel-auto-open" type="checkbox"> 打开网页后自动显示操作面板</label>',
     '<label class="pit-reader-field"><span>Markdown 保存目录</span><input class="pit-panel-save-dir" placeholder="WebNotes"><small class="pit-reader-help">只能填写 Chrome 下载目录下的子文件夹，例如 WebNotes，不能填写 /Users/... 绝对路径。</small></label>',
     '</div>',
@@ -649,7 +651,7 @@ function openAskPanel(settings = {}) {
 
   document.body.appendChild(panel);
   hydrateReaderPanel(panel, settings);
-  applySavedPanelLayout(panel).finally(() => makePanelMovableAndResizable(panel));
+  applySavedPanelSize(panel).finally(() => makePanelMovableAndResizable(panel));
   isolatePanelScroll(panel);
   prewarmPanelModel(panel);
   focusWithoutPageScroll(panel.querySelector(".pit-panel-translate"));
@@ -673,6 +675,7 @@ function hydrateReaderPanel(panel, settings) {
   panel.querySelector(".pit-panel-line-height").value = normalizeLineHeight(initial.translationLineHeight);
   panel.querySelector(".pit-panel-mark-style").value = initial.markStyle || DEFAULT_OLLAMA.markStyle;
   panel.querySelector(".pit-panel-mark-color").value = normalizeColor(initial.markHighlightColor || DEFAULT_OLLAMA.markHighlightColor);
+  panel.querySelector(".pit-panel-mark-to-note").checked = initial.autoSendMarkedToNote !== false;
   panel.querySelector(".pit-panel-auto-open").checked = initial.autoOpenPanel !== false;
   panel.querySelector(".pit-panel-save-dir").value = initial.saveDir || "page-notes";
   updateTypographyLabels(panel);
@@ -717,6 +720,7 @@ function hydrateReaderPanel(panel, settings) {
     ".pit-panel-line-height",
     ".pit-panel-mark-style",
     ".pit-panel-mark-color",
+    ".pit-panel-mark-to-note",
     ".pit-panel-auto-open",
     ".pit-panel-save-dir"
   ].join(",")).forEach((control) => {
@@ -816,6 +820,7 @@ function readPanelSettings(panel) {
     translationStyle: panel.querySelector(".pit-panel-style")?.value || "bar",
     markStyle: panel.querySelector(".pit-panel-mark-style")?.value || DEFAULT_OLLAMA.markStyle,
     markHighlightColor: normalizeColor(panel.querySelector(".pit-panel-mark-color")?.value || DEFAULT_OLLAMA.markHighlightColor),
+    autoSendMarkedToNote: panel.querySelector(".pit-panel-mark-to-note")?.checked !== false,
     provider,
     model: selectedModel?.trim() || DEFAULT_OLLAMA.model,
     baseUrl: panel.querySelector(".pit-panel-base-url")?.value.trim() || DEFAULT_OLLAMA.baseUrl,
@@ -1072,22 +1077,17 @@ function isolatePanelScroll(panel) {
   panel.addEventListener("touchmove", stop, { passive: true });
 }
 
-async function applySavedPanelLayout(panel) {
+async function applySavedPanelSize(panel) {
   try {
     const stored = await chrome.storage.local.get(PANEL_LAYOUT_KEY);
     const layout = stored?.[PANEL_LAYOUT_KEY];
     if (!layout) return;
     const width = clampNumber(layout.width, PANEL_MIN_WIDTH, Math.max(PANEL_MIN_WIDTH, window.innerWidth - PANEL_EDGE_GAP * 2));
     const height = clampNumber(layout.height, PANEL_MIN_HEIGHT, Math.max(PANEL_MIN_HEIGHT, window.innerHeight - PANEL_EDGE_GAP * 2));
-    const position = clampPanelPosition(layout.left, layout.top, width, height);
     panel.style.width = `${width}px`;
     panel.style.height = `${height}px`;
-    panel.style.left = `${position.left}px`;
-    panel.style.top = `${position.top}px`;
-    panel.style.right = "auto";
-    panel.style.bottom = "auto";
   } catch {
-    // 布局恢复失败时继续使用默认位置。
+    // 尺寸恢复失败时继续使用默认大小。
   }
 }
 
@@ -1210,9 +1210,7 @@ function persistPanelLayout(panel) {
   chrome.storage.local.set({
     [PANEL_LAYOUT_KEY]: {
       width: Math.round(rect.width),
-      height: Math.round(rect.height),
-      left: Math.round(rect.left),
-      top: Math.round(rect.top)
+      height: Math.round(rect.height)
     }
   }).catch(() => {});
 }
@@ -1317,7 +1315,8 @@ async function translateSelectionText(text) {
 
 async function markSelectedTranslationText() {
   const selection = window.getSelection();
-  if (!selection?.rangeCount || !normalizeSelectedText(selection.toString())) {
+  const selectedText = normalizeSelectedText(selection?.toString() || "");
+  if (!selection?.rangeCount || !selectedText) {
     hideSelectionToolbar();
     return;
   }
@@ -1341,11 +1340,22 @@ async function markSelectedTranslationText() {
     range.insertNode(mark);
     selection.removeAllRanges();
     setPanelStatus(document.querySelector(`.${ASK_PANEL_CLASS}`), "已标记选中译文。");
+    if (settings.autoSendMarkedToNote !== false) {
+      appendMarkedTextToNote(selectedText, settings);
+    }
   } catch {
     setPanelStatus(document.querySelector(`.${ASK_PANEL_CLASS}`), "这段内容暂时无法标记。");
   } finally {
     hideSelectionToolbar();
   }
+}
+
+function appendMarkedTextToNote(text, settings = undefined) {
+  const selected = normalizeSelectedText(text);
+  if (!selected) return;
+  const style = settings?.markStyle || DEFAULT_OLLAMA.markStyle;
+  const marked = wrapMarkedMarkdown(escapeMarkdownInline(selected), style);
+  appendMarkdownLineToNote(`- ${marked}`, settings, "已标记并发送到笔记，草稿已自动保存。");
 }
 
 async function getCurrentPanelSettings() {
@@ -1388,25 +1398,31 @@ function insertSelectionTranslationTarget(range, target) {
 function appendSelectionToNote(text, settings = undefined) {
   const selected = normalizeSelectedText(text);
   if (!selected) return;
+  const summary = selected
+    .split(/\n+/)
+    .map((line) => `- *${escapeMarkdownInline(normalizeText(line))}*`)
+    .join("\n");
+  appendMarkdownLineToNote(summary, settings, "已发送到笔记，草稿已自动保存。");
+}
+
+function appendMarkdownLineToNote(markdown, settings = undefined, status = "已发送到笔记，草稿已自动保存。") {
+  const value = String(markdown || "").trim();
+  if (!value) return;
   const scrollPosition = capturePageScrollPosition();
   const panel = openAskPanel(settings);
   activateReaderTab(panel, "notes");
   const input = panel.querySelector(".pit-panel-note");
   panel.dataset.appendingSelection = "true";
   editNoteMarkdown(panel);
-  const summary = selected
-    .split(/\n+/)
-    .map((line) => `- *${escapeMarkdownInline(normalizeText(line))}*`)
-    .join("\n");
   panel.dataset.appendingSelection = "false";
-  const insertion = `${input.value.trim() ? "\n\n" : ""}${summary}\n`;
+  const insertion = `${input.value.trim() ? "\n\n" : ""}${value}\n`;
   const start = input.selectionStart ?? input.value.length;
   const end = input.selectionEnd ?? input.value.length;
   input.value = `${input.value.slice(0, start)}${insertion}${input.value.slice(end)}`;
   input.selectionStart = input.selectionEnd = start + insertion.length;
   focusWithoutPageScroll(input);
   persistNoteDraft(panel);
-  setPanelStatus(panel, "已发送到笔记，草稿已自动保存。");
+  setPanelStatus(panel, status);
   hideSelectionToolbar();
   restorePageScrollPosition(scrollPosition);
 }
@@ -1430,6 +1446,7 @@ function persistPanelSettings(settings) {
     translationStyle: settings.translationStyle,
     markStyle: settings.markStyle,
     markHighlightColor: settings.markHighlightColor,
+    autoSendMarkedToNote: settings.autoSendMarkedToNote,
     model: settings.model,
     baseUrl: settings.baseUrl,
     apiKey: settings.apiKey,
