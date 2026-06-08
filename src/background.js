@@ -3,6 +3,7 @@ const DEFAULT_SETTINGS = {
   mode: "append",
   translationStyle: "bar",
   markStyle: "highlight",
+  markHighlightColor: "#fff2a8",
   translationFontSize: 100,
   translationLineHeight: 1.4,
   autoOpenPanel: true,

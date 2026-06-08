@@ -33,6 +33,7 @@ const DEFAULT_OLLAMA = {
   model:    "qwen3.5:4b",
   baseUrl:  "http://localhost:11434",
   markStyle: "highlight",
+  markHighlightColor: "#fff2a8",
   translationFontSize: 100,
   translationLineHeight: 1.4,
   autoOpenPanel: true
@@ -443,6 +444,13 @@ function applyTranslationTypographyToPage(settings = {}) {
   });
 }
 
+function applyMarkColorToPage(settings = {}) {
+  const color = settings.markHighlightColor || DEFAULT_OLLAMA.markHighlightColor;
+  document.querySelectorAll('.pit-manual-mark[data-pit-mark-style="highlight"]').forEach((node) => {
+    node.style.setProperty("--pit-mark-highlight-color", color);
+  });
+}
+
 function restorePage() {
   streamingNodes.clear();
   document.querySelectorAll(`.${TRANSLATION_CLASS}`).forEach((n) => n.remove());
@@ -581,7 +589,9 @@ function openAskPanel(settings = {}) {
   panel.innerHTML = [
     '<div class="pit-reader-header">',
     '<div><strong>页面阅读助手</strong><span class="pit-reader-status">已连接当前页面</span></div>',
+    '<div class="pit-reader-header-actions"><button class="pit-panel-save-all" type="button" title="保存 Markdown" aria-label="保存 Markdown">保存</button>',
     '<button class="pit-ask-close" type="button" aria-label="关闭">×</button>',
+    '</div>',
     '</div>',
     '<nav class="pit-reader-tabs" aria-label="功能">',
     '<button class="pit-reader-tab is-active" data-reader-tab="translate" type="button">🌐 翻译</button>',
@@ -599,7 +609,6 @@ function openAskPanel(settings = {}) {
     '<div class="pit-reader-panel-section" data-reader-panel="ask">',
     `<section class="pit-ask-overview markdown-body">${isXPage() ? "正在总结 X 内容..." : "正在读取文章脉络..."}</section>`,
     '<section class="pit-ask-messages" aria-label="对话"></section>',
-    '<div class="pit-reader-actions pit-ask-save-row"><button class="pit-reader-secondary pit-panel-save-ask" type="button">保存 Ask Markdown</button></div>',
     '</div>',
     '<div class="pit-reader-panel-section" data-reader-panel="tweet">',
     '<label class="pit-reader-field"><span>想表达的内容</span><textarea class="pit-tweet-source" rows="7" placeholder="输入任意语言，写下你想表达的意思"></textarea></label>',
@@ -610,7 +619,6 @@ function openAskPanel(settings = {}) {
     '<div class="pit-reader-panel-section" data-reader-panel="notes">',
     '<div class="pit-reader-field pit-note-field"><span>我的笔记 · Markdown</span><div class="pit-note-editor"><textarea class="pit-panel-note" rows="10" spellcheck="false" placeholder="支持 Markdown：# 标题、- 要点、**重点**、`代码`、[链接](url)"></textarea><div class="pit-note-render markdown-body" hidden></div></div></div>',
     '<div class="pit-reader-checks"><label><input class="pit-save-url" type="checkbox" checked> 原始链接</label><label><input class="pit-save-original" type="checkbox" checked> 网页英文</label><label><input class="pit-save-translation" type="checkbox" checked> 中文翻译</label><label><input class="pit-save-ask" type="checkbox" checked> Ask 内容</label><label><input class="pit-save-note" type="checkbox" checked> 我的笔记</label></div>',
-    '<div class="pit-reader-actions"><button class="pit-reader-primary pit-panel-save-note" type="button">保存 Markdown</button></div>',
     '</div>',
     '<div class="pit-reader-panel-section" data-reader-panel="settings">',
     '<label class="pit-reader-field"><span>翻译后端</span><select class="pit-panel-provider"><option value="ollama">本地 Ollama</option><option value="openaiCompatible">OpenAI-compatible API</option></select></label>',
@@ -620,6 +628,7 @@ function openAskPanel(settings = {}) {
     '<label class="pit-reader-field pit-reader-range-field"><span>译文字号 <strong class="pit-font-size-value">100%</strong></span><input class="pit-panel-font-size" type="range" min="80" max="130" step="1"></label>',
     '<label class="pit-reader-field pit-reader-range-field"><span>译文行距 <strong class="pit-line-height-value">1.4</strong></span><input class="pit-panel-line-height" type="range" min="1.1" max="1.9" step="0.05"></label>',
     '<label class="pit-reader-field"><span>标记样式</span><select class="pit-panel-mark-style"><option value="highlight">高亮 ==文字==</option><option value="bold">加粗 **文字**</option><option value="italic">斜体 *文字*</option><option value="boldItalic">加粗斜体 ***文字***</option><option value="code">代码 `文字`</option></select></label>',
+    '<label class="pit-reader-field"><span>高亮颜色</span><input class="pit-panel-mark-color" type="color"></label>',
     '<label class="pit-reader-toggle"><input class="pit-panel-auto-open" type="checkbox"> 打开网页后自动显示操作面板</label>',
     '<label class="pit-reader-field"><span>Markdown 保存目录</span><input class="pit-panel-save-dir" placeholder="WebNotes"><small class="pit-reader-help">只能填写 Chrome 下载目录下的子文件夹，例如 WebNotes，不能填写 /Users/... 绝对路径。</small></label>',
     '</div>',
@@ -663,6 +672,7 @@ function hydrateReaderPanel(panel, settings) {
   panel.querySelector(".pit-panel-font-size").value = normalizeFontSizePercent(initial.translationFontSize);
   panel.querySelector(".pit-panel-line-height").value = normalizeLineHeight(initial.translationLineHeight);
   panel.querySelector(".pit-panel-mark-style").value = initial.markStyle || DEFAULT_OLLAMA.markStyle;
+  panel.querySelector(".pit-panel-mark-color").value = normalizeColor(initial.markHighlightColor || DEFAULT_OLLAMA.markHighlightColor);
   panel.querySelector(".pit-panel-auto-open").checked = initial.autoOpenPanel !== false;
   panel.querySelector(".pit-panel-save-dir").value = initial.saveDir || "page-notes";
   updateTypographyLabels(panel);
@@ -706,6 +716,7 @@ function hydrateReaderPanel(panel, settings) {
     ".pit-panel-font-size",
     ".pit-panel-line-height",
     ".pit-panel-mark-style",
+    ".pit-panel-mark-color",
     ".pit-panel-auto-open",
     ".pit-panel-save-dir"
   ].join(",")).forEach((control) => {
@@ -714,6 +725,9 @@ function hydrateReaderPanel(panel, settings) {
       if (control.matches(".pit-panel-font-size, .pit-panel-line-height")) {
         updateTypographyLabels(panel);
         applyTranslationTypographyToPage(panel.__pitSettings);
+      }
+      if (control.matches(".pit-panel-mark-color")) {
+        applyMarkColorToPage(panel.__pitSettings);
       }
       persistPanelSettings(panel.__pitSettings);
     };
@@ -742,44 +756,11 @@ function hydrateReaderPanel(panel, settings) {
     setPanelStatus(panel, "已恢复原文。");
   });
 
-  const saveNoteButton = panel.querySelector(".pit-panel-save-note");
-  saveNoteButton.addEventListener("mousedown", () => {
+  const saveAllButton = panel.querySelector(".pit-panel-save-all");
+  saveAllButton.addEventListener("mousedown", () => {
     panel.dataset.savingNote = "true";
   });
-  saveNoteButton.addEventListener("click", async () => {
-    panel.dataset.savingNote = "true";
-    setPanelStatus(panel, "正在保存...");
-    try {
-      const settings = readPanelSettings(panel);
-      if (isAbsoluteSavePath(settings.saveDir)) {
-        setPanelStatus(panel, "保存目录只能填下载目录下的子文件夹，例如 WebNotes。");
-        focusWithoutPageScroll(panel.querySelector(".pit-panel-save-dir"));
-        return;
-      }
-      const response = await chrome.runtime.sendMessage({
-        type: "SAVE_MARKDOWN_NOTE",
-        page: getPageBundle(),
-        note: getNoteMarkdown(panel).trim(),
-        options: {
-          saveDir: settings.saveDir,
-          saveUrl: panel.querySelector(".pit-save-url").checked,
-          saveOriginal: panel.querySelector(".pit-save-original").checked,
-          saveTranslation: panel.querySelector(".pit-save-translation").checked,
-          saveSummary: panel.querySelector(".pit-save-ask").checked,
-          saveNote: panel.querySelector(".pit-save-note").checked
-        }
-      });
-      if (!response?.ok) throw new Error(response?.error || "保存失败。");
-      clearNoteDraft(panel);
-      setPanelStatus(panel, `已保存：${response.filename}`);
-    } catch (error) {
-      setPanelStatus(panel, error?.message || String(error));
-    } finally {
-      panel.dataset.savingNote = "false";
-    }
-  });
-
-  panel.querySelector(".pit-panel-save-ask").addEventListener("click", () => saveAskMarkdown(panel));
+  saveAllButton.addEventListener("click", () => savePanelMarkdown(panel));
   panel.querySelector(".pit-tweet-generate").addEventListener("click", () => generateTweetPost(panel));
   panel.querySelector(".pit-tweet-copy").addEventListener("click", () => copyTweetPost(panel));
 }
@@ -834,6 +815,7 @@ function readPanelSettings(panel) {
     mode: panel.querySelector(".pit-panel-mode")?.value || "append",
     translationStyle: panel.querySelector(".pit-panel-style")?.value || "bar",
     markStyle: panel.querySelector(".pit-panel-mark-style")?.value || DEFAULT_OLLAMA.markStyle,
+    markHighlightColor: normalizeColor(panel.querySelector(".pit-panel-mark-color")?.value || DEFAULT_OLLAMA.markHighlightColor),
     provider,
     model: selectedModel?.trim() || DEFAULT_OLLAMA.model,
     baseUrl: panel.querySelector(".pit-panel-base-url")?.value.trim() || DEFAULT_OLLAMA.baseUrl,
@@ -1008,6 +990,39 @@ async function saveAskMarkdown(panel) {
     setPanelStatus(panel, `已保存：${response.filename}`);
   } catch (error) {
     setPanelStatus(panel, humanizeRuntimeError(error));
+  }
+}
+
+async function savePanelMarkdown(panel) {
+  panel.dataset.savingNote = "true";
+  setPanelStatus(panel, "正在保存...");
+  try {
+    const settings = readPanelSettings(panel);
+    if (isAbsoluteSavePath(settings.saveDir)) {
+      setPanelStatus(panel, "保存目录只能填下载目录下的子文件夹，例如 WebNotes。");
+      focusWithoutPageScroll(panel.querySelector(".pit-panel-save-dir"));
+      return;
+    }
+    const response = await sendRuntimeMessageWithTimeout({
+      type: "SAVE_MARKDOWN_NOTE",
+      page: getPageBundle(),
+      note: getNoteMarkdown(panel).trim(),
+      options: {
+        saveDir: settings.saveDir,
+        saveUrl: panel.querySelector(".pit-save-url")?.checked !== false,
+        saveOriginal: panel.querySelector(".pit-save-original")?.checked !== false,
+        saveTranslation: panel.querySelector(".pit-save-translation")?.checked !== false,
+        saveSummary: panel.querySelector(".pit-save-ask")?.checked !== false,
+        saveNote: panel.querySelector(".pit-save-note")?.checked !== false
+      }
+    }, 30000, "保存超时，请稍后重试。");
+    if (!response?.ok) throw new Error(response?.error || "保存失败。");
+    clearNoteDraft(panel);
+    setPanelStatus(panel, `已保存：${response.filename}`);
+  } catch (error) {
+    setPanelStatus(panel, humanizeRuntimeError(error));
+  } finally {
+    panel.dataset.savingNote = "false";
   }
 }
 
@@ -1319,6 +1334,7 @@ async function markSelectedTranslationText() {
   const mark = document.createElement("span");
   mark.className = "pit-manual-mark";
   mark.dataset.pitMarkStyle = settings.markStyle || DEFAULT_OLLAMA.markStyle;
+  mark.style.setProperty("--pit-mark-highlight-color", settings.markHighlightColor || DEFAULT_OLLAMA.markHighlightColor);
   try {
     const content = range.extractContents();
     mark.appendChild(content);
@@ -1413,6 +1429,7 @@ function persistPanelSettings(settings) {
     mode: settings.mode,
     translationStyle: settings.translationStyle,
     markStyle: settings.markStyle,
+    markHighlightColor: settings.markHighlightColor,
     model: settings.model,
     baseUrl: settings.baseUrl,
     apiKey: settings.apiKey,
@@ -1585,6 +1602,11 @@ function normalizeLineHeight(value) {
   const number = Number(value);
   if (!Number.isFinite(number)) return DEFAULT_OLLAMA.translationLineHeight;
   return Math.min(1.9, Math.max(1.1, Math.round(number * 100) / 100));
+}
+
+function normalizeColor(value) {
+  const text = String(value || "").trim();
+  return /^#[0-9a-fA-F]{6}$/.test(text) ? text : DEFAULT_OLLAMA.markHighlightColor;
 }
 
 async function loadPanelOverview(panel) {

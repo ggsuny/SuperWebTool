@@ -174,6 +174,30 @@
   cursor: grabbing;
 }
 
+.pit-reader-header-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.pit-panel-save-all {
+  min-height: 26px;
+  padding: 4px 9px;
+  border: 1px solid #c9d2df;
+  border-radius: 7px;
+  background: #fff;
+  color: #344054;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 750;
+  line-height: 1.2;
+}
+
+.pit-panel-save-all:hover {
+  background: #f8fafc;
+}
+
 .pit-panel-resize-handle {
   position: absolute;
   z-index: 2;
@@ -635,7 +659,7 @@
 }
 
 .pit-manual-mark[data-pit-mark-style="highlight"] {
-  background: #fff2a8;
+  background: var(--pit-mark-highlight-color, #fff2a8);
   box-shadow: inset 0 -0.22em 0 rgba(255, 210, 64, 0.72);
 }
 
