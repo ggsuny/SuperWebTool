@@ -9,10 +9,18 @@ const TRANSLATION_CLASS   = "pit-translation";
 const REPLACED_CLASS      = "pit-replaced";
 const ASK_PANEL_CLASS     = "pit-ask-panel";
 const SELECTION_TOOLBAR_CLASS = "pit-selection-toolbar";
+const PDF_SECTION_CLASS   = "pit-pdf-content";
+const PDF_BLOCK_CLASS     = "pit-pdf-block";
 const ORIGINAL_HTML_ATTR  = "data-pit-original-html";
 const PROCESSED_ATTR      = "data-pit-processed";
+const PDF_SOURCE_ATTR     = "data-pit-pdf-source";
 const MAX_BLOCKS_PER_RUN  = 500;
+const MAX_PDFS_PER_PAGE   = 3;
+const MAX_PDF_PARAGRAPHS_PER_FILE = 120;
 const TRANSLATION_CHUNK_LENGTH = 600;
+const SHORT_TEXT_REPLACE_MAX_WORDS = 4;
+const PROTECTED_INLINE_TOKEN_PATTERN = /(?<![\p{L}\p{N}_])(?:[@#][\p{L}\p{N}_][\p{L}\p{N}_.-]{0,63}|\$[A-Za-z][A-Za-z0-9._-]{0,15}|[A-Z]{2,8}\/[A-Z]{2,8}|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})(?![\p{L}\p{N}_])/gu;
+const COMMON_UNTRANSLATED_TERM_PATTERN = /\b(?:ETF|ETFs|SPY|QQQ|DIA|IWM|VIX|CPI|PCE|FOMC|Fed|GDP|CME|NYSE|NASDAQ|IPO|EPS|PE|P\/E|AI|API|GPU|CPU|LLM|SaaS|BTC|ETH|SOL|USDT|USDC|DeFi|NFT|Bearish|Bullish|Triple\s+Witching)\b/giu;
 const CACHE_PREFIX        = "pit_cache_";
 const NOTE_DRAFT_PREFIX   = "pit_note_draft_";
 const PANEL_LAYOUT_KEY    = "pit_reader_panel_layout";
@@ -34,9 +42,12 @@ const DEFAULT_OLLAMA = {
   baseUrl:  "http://localhost:11434",
   markStyle: "highlight",
   markHighlightColor: "#fff2a8",
-  autoSendMarkedToNote: true,
+  markHighlightColorLight: "#fff2a8",
+  markHighlightColorDark: "#facc15",
   translationFontSize: 100,
   translationLineHeight: 1.4,
+  noteSaveShortcut: "enter",
+  shortTextReplaceMode: false,
   autoOpenPanel: true
 };
 
@@ -44,11 +55,28 @@ const BLOCK_SELECTOR = [
   '[data-testid="tweetText"]',
   'article [data-testid="tweetText"]',
   'article div[lang][dir="auto"]',
+  "article", "main", '[role="main"]', "main article", "main section",
   "article p", "main p", "section p", "p",
-  "article li", "main li",
+  "article li", "main li", "article span[lang]", "main span[lang]",
   "blockquote", "figcaption", "dd", "dt", "td", "th",
+  `.${PDF_BLOCK_CLASS}`,
   "h1", "h2", "h3", "h4", "h5", "h6"
 ].join(",");
+
+const PARAGRAPH_BOUNDARY_TAGS = new Set([
+  "ARTICLE", "ASIDE", "BLOCKQUOTE", "DD", "DETAILS", "DIV", "DL", "DT",
+  "FIGCAPTION", "FIGURE", "FOOTER", "H1", "H2", "H3", "H4", "H5", "H6",
+  "HEADER", "LI", "MAIN", "OL", "P", "PRE", "SECTION", "TABLE", "TBODY",
+  "TD", "TFOOT", "TH", "THEAD", "TR", "UL"
+]);
+
+const TEXT_FALLBACK_CONTAINER_SELECTOR = [
+  "p", "li", "blockquote", "figcaption", "dd", "dt", "td", "th",
+  "h1", "h2", "h3", "h4", "h5", "h6",
+  "div"
+].join(",");
+
+const INLINE_TEXT_OWNER_SELECTOR = "span, a, strong, b, em, i, u, small, mark, time, cite, label";
 
 const SKIP_SELECTOR = [
   "script", "style", "noscript", "svg", "canvas",
@@ -63,27 +91,64 @@ const SKIP_SELECTOR = [
 const streamingNodes = new Map();
 let lastArticleSnapshot = null;
 let lastSummaryText = "";
+let lastNoteTitle = "";
 let lastSeenUrl = location.href;
 let lastMousePoint = { x: 0, y: 0 };
+let lastDetectedPageTheme = "";
+let lastPageSelection = null;
+let lastKnownSettings = { ...DEFAULT_OLLAMA };
+let pdfExtractorFramePromise = null;
+let hoverNoteTarget = null;
+let hoverNoteComposer = null;
+let hoverNoteHideTimer = null;
+let hoverNoteShowTimer = null;
+let hoverNotePositionFrame = 0;
+let hoverNoteComposers = new Map();
+const hoverNoteResizeObserver = typeof ResizeObserver === "function"
+  ? new ResizeObserver(() => scheduleHoverNotePositionSync())
+  : null;
 
 document.addEventListener("mouseup", (event) => {
   lastMousePoint = { x: event.clientX, y: event.clientY };
   setTimeout(showSelectionToolbar, 40);
 });
 
+document.addEventListener("selectionchange", () => {
+  setTimeout(capturePageSelectionSnapshot, 0);
+});
+
+document.addEventListener("contextmenu", () => {
+  capturePageSelectionSnapshot();
+});
+
 document.addEventListener("mousedown", (event) => {
   if (!event.target?.closest?.(`.${SELECTION_TOOLBAR_CLASS}`)) hideSelectionToolbar();
 });
 
+document.addEventListener("pointerover", handleHoverNotePointerOver);
+document.addEventListener("pointerout", handleHoverNotePointerOut);
+window.addEventListener("scroll", scheduleHoverNotePositionSync, true);
+window.addEventListener("resize", scheduleHoverNotePositionSync);
+
 setInterval(() => {
   if (lastSeenUrl === location.href) return;
   lastSeenUrl = location.href;
+  removeHoverNoteComposer(true);
+  hoverNoteResizeObserver?.disconnect();
+  hoverNoteComposers = new Map();
+  syncMarkedNotesForCurrentUrl();
   document.querySelector(`.${ASK_PANEL_CLASS}`)?.remove();
+  document.querySelectorAll(`.${PDF_SECTION_CLASS}`).forEach((node) => node.remove());
+  hideSelectionToolbar();
+  lastPageSelection = null;
   lastArticleSnapshot = null;
   lastSummaryText = "";
+  lastNoteTitle = "";
 }, 1000);
 
 initAutoOpenPanel();
+initMarkThemeWatcher();
+initSettingsSyncWatcher();
 
 // ─── 消息监听 ─────────────────────────────────────────────────
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -110,24 +175,31 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return false;
   }
 
+  if (message?.type === "SUMMARY_PAGE") {
+    summarizePageForPopup(message.settings)
+      .then((result) => sendResponse({ ok: true, ...result }))
+      .catch((err) => sendResponse({ ok: false, error: err?.message || String(err) }));
+    return true;
+  }
+
   if (message?.type === "OPEN_ASK_PANEL") {
     openAskPanel(message.settings);
     sendResponse({ ok: true });
     return false;
   }
 
-  if (message?.type === "APPEND_SELECTION_TO_NOTE") {
-    const selected = normalizeSelectedText(window.getSelection()?.toString() || "");
-    if (!selected) {
-      const panel = openAskPanel(message.settings);
-      activateReaderTab(panel, "notes");
-      setPanelStatus(panel, "当前没有选中文本。");
-      sendResponse({ ok: false, error: "当前没有选中文本。" });
-      return false;
-    }
-    appendSelectionToNote(selected, message.settings);
-    sendResponse({ ok: true });
-    return false;
+  if (message?.type === "RUN_READER_ACTION") {
+    runReaderActionFromMessage(message)
+      .then((result) => sendResponse({ ok: true, ...result }))
+      .catch((err) => sendResponse({ ok: false, error: err?.message || String(err) }));
+    return true;
+  }
+
+  if (message?.type === "MARK_SELECTION") {
+    markSelectedTranslationText()
+      .then(() => sendResponse({ ok: true }))
+      .catch((err) => sendResponse({ ok: false, error: err?.message || String(err) }));
+    return true;
   }
 
   return false;
@@ -144,12 +216,14 @@ async function translatePage(settings) {
   restorePage();
   streamingNodes.clear();
 
+  const pdfResult = await ensurePdfContentSections();
   const allBlocks = collectBlocks();
   if (!allBlocks.length) {
-    return { translated: 0, message: "未找到适合翻译的正文段落。" };
+    return { translated: 0, message: pdfResult.message || "未找到适合翻译的正文段落。" };
   }
   lastArticleSnapshot = createArticleSnapshot(allBlocks);
   lastSummaryText = "";
+  lastNoteTitle = "";
 
   const style = settings.translationStyle || "bar";
 
@@ -164,7 +238,8 @@ async function translatePage(settings) {
   // 缓存命中 → 立即渲染
   const { cachedBlocks, uncachedBlocks } = splitByCache(sorted);
   for (const { block, translation } of cachedBlocks) {
-    insertTranslationNode(block, translation, settings.mode, style, settings);
+    const render = resolveTranslationRender(block, settings, style);
+    insertTranslationNode(block, translation, render.mode, render.style, settings);
   }
 
   // 未缓存 → 后台队列翻译。只在段落真正开始翻译时插入 DOM，避免大页面一次性重排。
@@ -180,7 +255,10 @@ async function translatePage(settings) {
 
   return {
     translated: allBlocks.length,
-    message: `已开始翻译。${cachedBlocks.length} 段来自缓存，${uncachedBlocks.length} 段流式翻译中...`
+    message: [
+      pdfResult.loaded ? `已读取 ${pdfResult.loaded} 个 PDF。` : "",
+      `已开始翻译。${cachedBlocks.length} 段来自缓存，${uncachedBlocks.length} 段流式翻译中...`
+    ].filter(Boolean).join(" ")
   };
 }
 
@@ -213,12 +291,13 @@ async function streamAll(blocks, settings, run, style) {
 }
 
 async function streamBlock(block, settings, run, style) {
-  if (run.cancelled || block.element.matches(`[${PROCESSED_ATTR}]`)) return;
+  if (run.cancelled || isAlreadyHandledBlock(block.element)) return;
 
   const paraId = `pit_${Date.now()}_${Math.random().toString(36).slice(2)}`;
-  const node = createStreamingTarget(block, settings.mode, style, settings);
+  const render = resolveTranslationRender(block, settings, style);
+  const node = createStreamingTarget(block, render.mode, render.style, settings);
   const renderer = createStreamRenderer(node, block.hasFormat);
-  const linkProtection = protectLinks(block.text);
+  const protectedSource = protectInlineTokens(protectLinks(block.text));
   let gotFirstToken = false;
 
   streamingNodes.set(paraId, { node, renderer, originalText: block.text });
@@ -231,21 +310,30 @@ async function streamBlock(block, settings, run, style) {
   }, FIRST_TOKEN_TIMEOUT_MS);
 
   try {
-    for (const textChunk of splitTextForTranslation(linkProtection.text)) {
+    for (const textChunk of splitTextForTranslation(protectedSource.text)) {
       if (run.cancelled) return;
-      await streamOneParagraph(textChunk, settings, (chunk) => {
-        if (run.cancelled) return;
-        if (!gotFirstToken) {
-          gotFirstToken = true;
-          clearTimeout(firstTokenTimer);
-          node.dataset.state = "loading";
+      if (textChunk.text) {
+        if (isProtectedPlaceholderOnly(textChunk.text)) {
+          renderer.append(restoreInlineTokens(textChunk.text, protectedSource));
+        } else {
+          await streamOneParagraph(textChunk.text, settings, (chunk) => {
+            if (run.cancelled) return;
+            if (!gotFirstToken) {
+              gotFirstToken = true;
+              clearTimeout(firstTokenTimer);
+              node.dataset.state = "loading";
+            }
+            renderer.append(restoreInlineTokens(chunk, protectedSource));
+          }, run);
         }
-        renderer.append(restoreProtectedLinks(chunk, linkProtection.links));
-      }, run);
+      }
+      if (textChunk.separator) {
+        renderer.append(textChunk.separator);
+      }
     }
 
     if (run.cancelled) return;
-    const finalText = restoreProtectedLinks(renderer.getText(), linkProtection.links);
+    const finalText = restoreInlineTokens(renderer.getText(), protectedSource);
     node.dataset.state = "done";
     renderer.finish(finalText);
     if (block.text && finalText) setCacheEntry(block.text, finalText);
@@ -319,28 +407,25 @@ async function streamOneParagraph(text, settings, onChunk, run) {
 }
 
 // ─── DOM 工具 ─────────────────────────────────────────────────
-function createStreamingNode(style, settings = {}) {
+function createStreamingNode(style, settings = {}, sourceElement = null) {
   const node = document.createElement("span");
   node.className        = TRANSLATION_CLASS;
   node.dataset.state    = "loading";
   node.dataset.pitStyle = style;
-  applyTranslationTypography(node, settings);
+  applyTranslationTypography(node, settings, sourceElement);
   return node;
 }
 
 function createStreamingTarget(block, mode, style, settings = {}) {
-  const node = createStreamingNode(style, settings);
+  const node = createStreamingNode(style, settings, block.element);
   block.element.setAttribute(PROCESSED_ATTR, "true");
   removeExistingTranslationFromBlock(block.element);
 
   if (mode === "replace") {
-    if (!block.element.hasAttribute(ORIGINAL_HTML_ATTR)) {
-      block.element.setAttribute(ORIGINAL_HTML_ATTR, block.element.innerHTML);
-    }
     node.classList.add(REPLACED_CLASS);
-    block.element.replaceChildren(node);
+    createCurtainReplaceTarget(block, node);
   } else {
-    block.element.appendChild(node);
+    placeTranslationNode(block.element, node);
   }
 
   return node;
@@ -352,10 +437,11 @@ function createStreamRenderer(node, hasFormat) {
 
   function render() {
     scheduled = false;
+    const visibleText = stripStreamedText(buffer);
     if (hasFormat) {
-      node.innerHTML = markdownToHtml(buffer);
+      node.innerHTML = markdownToHtml(visibleText);
     } else {
-      node.textContent = buffer;
+      node.textContent = visibleText;
     }
   }
 
@@ -381,21 +467,56 @@ function createStreamRenderer(node, hasFormat) {
 }
 
 function insertTranslationNode(block, translation, mode, style, settings = {}) {
+  if (isAlreadyHandledBlock(block.element)) return;
   removeExistingTranslationFromBlock(block.element);
   if (mode === "replace") {
     const node = replaceBlock(block, translation);
-    applyTranslationTypography(node, settings);
+    applyTranslationTypography(node, settings, block.element);
   } else {
-    const node = createStreamingNode(style, settings);
+    const node = createStreamingNode(style, settings, block.element);
     node.dataset.state = "done";
     if (block.hasFormat) {
       node.innerHTML = markdownToHtml(translation);
     } else {
       node.textContent = translation;
     }
-    block.element.appendChild(node);
+    placeTranslationNode(block.element, node);
   }
   block.element.setAttribute(PROCESSED_ATTR, "true");
+}
+
+function placeTranslationNode(sourceElement, translationNode) {
+  removeExistingTranslationFromBlock(sourceElement);
+  if (shouldPlaceTranslationAfterElement(sourceElement)) {
+    sourceElement.insertAdjacentElement("afterend", translationNode);
+  } else {
+    sourceElement.appendChild(translationNode);
+  }
+}
+
+function shouldPlaceTranslationAfterElement(element) {
+  if (!(element instanceof HTMLElement)) return false;
+  if (isParagraphBoundaryElement(element)) return false;
+  const display = getElementDisplayStyle(element).display;
+  return /^(inline|inline-block|inline-flex|inline-grid)$/.test(display || "");
+}
+
+function resolveTranslationRender(block, settings = {}, fallbackStyle = "bar") {
+  if (settings.shortTextReplaceMode && isShortTextBlock(block?.text)) {
+    return { mode: "replace", style: "none" };
+  }
+
+  return {
+    mode: settings.mode || "append",
+    style: settings.translationStyle || fallbackStyle || "bar"
+  };
+}
+
+function isShortTextBlock(text) {
+  const normalized = normalizeText(text);
+  if (!normalized) return false;
+  const words = normalized.match(/[A-Za-z0-9]+(?:[-'][A-Za-z0-9]+)?/g) || [];
+  return words.length > 0 && words.length <= SHORT_TEXT_REPLACE_MAX_WORDS;
 }
 
 function replaceBlock(block, translation) {
@@ -405,13 +526,31 @@ function replaceBlock(block, translation) {
   }
   const wrapper = document.createElement("span");
   wrapper.className = REPLACED_CLASS;
+  wrapper.dataset.state = "done";
   if (block.hasFormat) {
     wrapper.innerHTML = markdownToHtml(translation);
   } else {
     wrapper.textContent = translation;
   }
-  el.replaceChildren(wrapper);
+  createCurtainReplaceTarget(block, wrapper);
   return wrapper;
+}
+
+function createCurtainReplaceTarget(block, translationNode) {
+  const el = block.element;
+  if (!el.hasAttribute(ORIGINAL_HTML_ATTR)) {
+    el.setAttribute(ORIGINAL_HTML_ATTR, el.innerHTML);
+  }
+
+  const original = document.createElement("span");
+  original.className = "pit-curtain-original";
+  original.innerHTML = el.getAttribute(ORIGINAL_HTML_ATTR) || "";
+
+  const stage = document.createElement("span");
+  stage.className = "pit-curtain-stage";
+  stage.style.setProperty("--pit-curtain-min-height", `${Math.max(1, Math.ceil(el.getBoundingClientRect().height))}px`);
+  stage.append(original, translationNode);
+  el.replaceChildren(stage);
 }
 
 function protectLinks(text) {
@@ -425,6 +564,27 @@ function protectLinks(text) {
   return { text: protectedText, links };
 }
 
+function protectInlineTokens(protection) {
+  const tokens = [];
+  const source = String(protection?.text || "");
+  const protectedText = source
+    .replace(PROTECTED_INLINE_TOKEN_PATTERN, (match) => {
+      const token = `PITTOKEN${tokens.length}`;
+      tokens.push(match);
+      return token;
+    })
+    .replace(COMMON_UNTRANSLATED_TERM_PATTERN, (match) => {
+      const token = `PITTOKEN${tokens.length}`;
+      tokens.push(match);
+      return token;
+    });
+  return {
+    ...protection,
+    text: protectedText,
+    tokens
+  };
+}
+
 function restoreProtectedLinks(text, links = []) {
   return String(text || "").replace(/PIT\s*LINK\s*(\d+)|PITLINK(\d+)/gi, (match, spacedIndex, compactIndex) => {
     const index = Number(spacedIndex || compactIndex);
@@ -432,11 +592,33 @@ function restoreProtectedLinks(text, links = []) {
   });
 }
 
-function applyTranslationTypography(node, settings = {}) {
+function restoreInlineTokens(text, protection = {}) {
+  const withTokens = String(text || "").replace(/PIT\s*TOKEN\s*(\d+)|PITTOKEN(\d+)/gi, (match, spacedIndex, compactIndex) => {
+    const index = Number(spacedIndex || compactIndex);
+    return protection.tokens?.[index] || match;
+  });
+  return restoreProtectedLinks(withTokens, protection.links);
+}
+
+function isProtectedPlaceholderOnly(text) {
+  const value = String(text || "").trim();
+  if (!value) return false;
+  const stripped = value
+    .replace(/(?:PIT\s*TOKEN\s*\d+|PITTOKEN\d+|PIT\s*LINK\s*\d+|PITLINK\d+)/gi, "")
+    .replace(/\s+/g, "")
+    .trim();
+  return stripped === "";
+}
+
+function applyTranslationTypography(node, settings = {}, sourceElement = null) {
   const fontSize = normalizeFontSizePercent(settings.translationFontSize);
   const lineHeight = normalizeLineHeight(settings.translationLineHeight);
   node.style.setProperty("--pit-translation-font-size", `${fontSize}%`);
   node.style.setProperty("--pit-translation-line-height", String(lineHeight));
+
+  if (sourceElement instanceof Element) {
+    copySourceFontStyle(node, sourceElement);
+  }
 }
 
 function applyTranslationTypographyToPage(settings = {}) {
@@ -445,8 +627,24 @@ function applyTranslationTypographyToPage(settings = {}) {
   });
 }
 
+function copySourceFontStyle(node, sourceElement) {
+  const computed = window.getComputedStyle(sourceElement);
+  [
+    "font-family",
+    "font-weight",
+    "font-style",
+    "font-stretch",
+    "font-variant",
+    "letter-spacing",
+    "text-transform",
+    "text-rendering"
+  ].forEach((property) => {
+    node.style.setProperty(property, computed.getPropertyValue(property));
+  });
+}
+
 function applyMarkColorToPage(settings = {}) {
-  const color = settings.markHighlightColor || DEFAULT_OLLAMA.markHighlightColor;
+  const color = getMarkHighlightColor(settings);
   document.querySelectorAll(".pit-manual-mark").forEach((node) => {
     node.style.setProperty("--pit-mark-highlight-color", color);
   });
@@ -467,6 +665,10 @@ function restorePage() {
 
 function removeExistingTranslationFromBlock(element) {
   element?.querySelectorAll?.(`:scope > .${TRANSLATION_CLASS}, :scope > .${REPLACED_CLASS}`).forEach((node) => node.remove());
+  if (element?.nextElementSibling?.classList?.contains(TRANSLATION_CLASS)
+    || element?.nextElementSibling?.classList?.contains(REPLACED_CLASS)) {
+    element.nextElementSibling.remove();
+  }
 }
 
 function buildArticleText(blocks) {
@@ -508,6 +710,7 @@ function getPageBundle() {
 
   return {
     title: snapshot.title || normalizeText(document.title),
+    noteTitle: lastNoteTitle,
     url: snapshot.url || location.href,
     sourceType: isXPage() ? "x" : "web",
     capturedAt: snapshot.capturedAt,
@@ -571,13 +774,16 @@ function getAskMarkdown(panel) {
 }
 
 // ─── 页面内阅读助手面板 ───────────────────────────────────────
-function openAskPanel(settings = {}) {
+function openAskPanel(settings = {}, options = {}) {
+  const resolvedSettings = { ...DEFAULT_OLLAMA, ...lastKnownSettings, ...settings };
+  lastKnownSettings = resolvedSettings;
   let panel = document.querySelector(`.${ASK_PANEL_CLASS}`);
   if (panel) {
     if (panel.dataset.pageUrl !== location.href) {
       panel.remove();
       panel = null;
     } else {
+      applyExternalSettingsToPanel(panel, resolvedSettings);
       panel.hidden = false;
       return panel;
     }
@@ -586,10 +792,10 @@ function openAskPanel(settings = {}) {
   panel = document.createElement("aside");
   panel.className = ASK_PANEL_CLASS;
   panel.dataset.pageUrl = location.href;
-  panel.__pitSettings = { ...DEFAULT_OLLAMA, ...settings };
+  panel.__pitSettings = resolvedSettings;
   panel.innerHTML = [
     '<div class="pit-reader-header">',
-    '<div><strong>页面阅读助手</strong><span class="pit-reader-status">已连接当前页面</span></div>',
+    '<div><strong>页面阅读助手</strong></div>',
     '<div class="pit-reader-header-actions"><button class="pit-panel-save-all" type="button" title="保存 Markdown" aria-label="保存 Markdown">保存</button>',
     '<button class="pit-ask-close" type="button" aria-label="关闭">×</button>',
     '</div>',
@@ -604,7 +810,8 @@ function openAskPanel(settings = {}) {
     '<section class="pit-reader-body">',
     '<div class="pit-reader-panel-section is-active" data-reader-panel="translate">',
     '<label class="pit-reader-field"><span>翻译模式</span><select class="pit-panel-mode"><option value="append">段落下方增加中文</option><option value="replace">替换原文</option></select></label>',
-    '<label class="pit-reader-field"><span>译文样式</span><select class="pit-panel-style"><option value="bar">左侧竖线</option><option value="dashed-box">虚线方框</option><option value="highlight">浅色高亮</option><option value="top-line">顶部细线</option><option value="bubble">圆角气泡</option></select></label>',
+    '<label class="pit-reader-field"><span>译文样式</span><select class="pit-panel-style"><option value="none">无</option><option value="bar">左侧竖线</option><option value="dashed-box">虚线方框</option><option value="highlight">浅色高亮</option><option value="top-line">顶部细线</option><option value="bubble">圆角气泡</option></select></label>',
+    '<label class="pit-reader-toggle"><input class="pit-panel-short-replace" type="checkbox"> 短句自动替换原文</label>',
     '<div class="pit-reader-actions"><button class="pit-reader-primary pit-panel-translate" type="button">翻译当前页面</button><button class="pit-reader-secondary pit-panel-restore" type="button">恢复原文</button></div>',
     '</div>',
     '<div class="pit-reader-panel-section" data-reader-panel="ask">',
@@ -629,8 +836,11 @@ function openAskPanel(settings = {}) {
     '<label class="pit-reader-field pit-reader-range-field"><span>译文字号 <strong class="pit-font-size-value">100%</strong></span><input class="pit-panel-font-size" type="range" min="80" max="130" step="1"></label>',
     '<label class="pit-reader-field pit-reader-range-field"><span>译文行距 <strong class="pit-line-height-value">1.4</strong></span><input class="pit-panel-line-height" type="range" min="1.1" max="1.9" step="0.05"></label>',
     '<label class="pit-reader-field"><span>标记样式</span><select class="pit-panel-mark-style"><option value="highlight">高亮 ==文字==</option><option value="bold">加粗 **文字**</option><option value="italic">斜体 *文字*</option><option value="boldItalic">加粗斜体 ***文字***</option><option value="code">代码 `文字`</option></select></label>',
-    '<label class="pit-reader-field"><span>高亮颜色</span><input class="pit-panel-mark-color" type="color"></label>',
-    '<label class="pit-reader-toggle"><input class="pit-panel-mark-to-note" type="checkbox"> 标记后自动发送到笔记</label>',
+    '<label class="pit-reader-field"><span>浮动笔记保存</span><select class="pit-panel-note-shortcut"><option value="enter">Enter</option><option value="cmdEnter">Cmd/Ctrl + Enter</option></select></label>',
+    '<div class="pit-reader-color-grid">',
+    '<label class="pit-reader-field"><span>浅色网页标记色</span><input class="pit-panel-mark-color-light" type="color"></label>',
+    '<label class="pit-reader-field"><span>深色网页标记色</span><input class="pit-panel-mark-color-dark" type="color"></label>',
+    '</div>',
     '<label class="pit-reader-toggle"><input class="pit-panel-auto-open" type="checkbox"> 打开网页后自动显示操作面板</label>',
     '<label class="pit-reader-field"><span>Markdown 保存目录</span><input class="pit-panel-save-dir" placeholder="WebNotes"><small class="pit-reader-help">只能填写 Chrome 下载目录下的子文件夹，例如 WebNotes，不能填写 /Users/... 绝对路径。</small></label>',
     '</div>',
@@ -639,6 +849,7 @@ function openAskPanel(settings = {}) {
     '<textarea class="pit-ask-input" rows="1" placeholder="提问，Enter 发送"></textarea>',
     '<button class="pit-ask-send" type="button" aria-label="发送">➤</button>',
     '</div>',
+    '<div class="pit-reader-status" aria-live="polite">已连接当前页面</div>',
     '<div class="pit-panel-resize-handle is-n" data-resize-edge="n"></div>',
     '<div class="pit-panel-resize-handle is-e" data-resize-edge="e"></div>',
     '<div class="pit-panel-resize-handle is-s" data-resize-edge="s"></div>',
@@ -650,11 +861,13 @@ function openAskPanel(settings = {}) {
   ].join("");
 
   document.body.appendChild(panel);
-  hydrateReaderPanel(panel, settings);
+  hydrateReaderPanel(panel, resolvedSettings);
   applySavedPanelSize(panel).finally(() => makePanelMovableAndResizable(panel));
   isolatePanelScroll(panel);
   prewarmPanelModel(panel);
-  focusWithoutPageScroll(panel.querySelector(".pit-panel-translate"));
+  if (options.focus !== false) {
+    focusWithoutPageScroll(panel.querySelector(".pit-panel-translate"));
+  }
   return panel;
 }
 
@@ -667,6 +880,7 @@ function hydrateReaderPanel(panel, settings) {
 
   panel.querySelector(".pit-panel-mode").value = initial.mode || "append";
   panel.querySelector(".pit-panel-style").value = initial.translationStyle || "bar";
+  panel.querySelector(".pit-panel-short-replace").checked = Boolean(initial.shortTextReplaceMode);
   panel.querySelector(".pit-panel-provider").value = initial.provider || "ollama";
   panel.querySelector(".pit-panel-model-input").value = initial.model || DEFAULT_OLLAMA.model;
   panel.querySelector(".pit-panel-base-url").value = initial.baseUrl || DEFAULT_OLLAMA.baseUrl;
@@ -674,8 +888,9 @@ function hydrateReaderPanel(panel, settings) {
   panel.querySelector(".pit-panel-font-size").value = normalizeFontSizePercent(initial.translationFontSize);
   panel.querySelector(".pit-panel-line-height").value = normalizeLineHeight(initial.translationLineHeight);
   panel.querySelector(".pit-panel-mark-style").value = initial.markStyle || DEFAULT_OLLAMA.markStyle;
-  panel.querySelector(".pit-panel-mark-color").value = normalizeColor(initial.markHighlightColor || DEFAULT_OLLAMA.markHighlightColor);
-  panel.querySelector(".pit-panel-mark-to-note").checked = initial.autoSendMarkedToNote !== false;
+  panel.querySelector(".pit-panel-note-shortcut").value = initial.noteSaveShortcut || DEFAULT_OLLAMA.noteSaveShortcut;
+  panel.querySelector(".pit-panel-mark-color-light").value = getStoredMarkColor(initial, "light");
+  panel.querySelector(".pit-panel-mark-color-dark").value = getStoredMarkColor(initial, "dark");
   panel.querySelector(".pit-panel-auto-open").checked = initial.autoOpenPanel !== false;
   panel.querySelector(".pit-panel-save-dir").value = initial.saveDir || "page-notes";
   updateTypographyLabels(panel);
@@ -711,6 +926,7 @@ function hydrateReaderPanel(panel, settings) {
   panel.querySelectorAll([
     ".pit-panel-mode",
     ".pit-panel-style",
+    ".pit-panel-short-replace",
     ".pit-panel-provider",
     ".pit-panel-model-select",
     ".pit-panel-model-input",
@@ -719,8 +935,9 @@ function hydrateReaderPanel(panel, settings) {
     ".pit-panel-font-size",
     ".pit-panel-line-height",
     ".pit-panel-mark-style",
-    ".pit-panel-mark-color",
-    ".pit-panel-mark-to-note",
+    ".pit-panel-note-shortcut",
+    ".pit-panel-mark-color-light",
+    ".pit-panel-mark-color-dark",
     ".pit-panel-auto-open",
     ".pit-panel-save-dir"
   ].join(",")).forEach((control) => {
@@ -730,7 +947,7 @@ function hydrateReaderPanel(panel, settings) {
         updateTypographyLabels(panel);
         applyTranslationTypographyToPage(panel.__pitSettings);
       }
-      if (control.matches(".pit-panel-mark-color")) {
+      if (control.matches(".pit-panel-mark-color-light, .pit-panel-mark-color-dark")) {
         applyMarkColorToPage(panel.__pitSettings);
       }
       persistPanelSettings(panel.__pitSettings);
@@ -767,6 +984,43 @@ function hydrateReaderPanel(panel, settings) {
   saveAllButton.addEventListener("click", () => savePanelMarkdown(panel));
   panel.querySelector(".pit-tweet-generate").addEventListener("click", () => generateTweetPost(panel));
   panel.querySelector(".pit-tweet-copy").addEventListener("click", () => copyTweetPost(panel));
+}
+
+function applyExternalSettingsToPanel(panel, settings = {}) {
+  if (!(panel instanceof HTMLElement) || !settings || !Object.keys(settings).length) return;
+  const next = { ...DEFAULT_OLLAMA, ...panel.__pitSettings, ...settings };
+  lastKnownSettings = { ...lastKnownSettings, ...next };
+  panel.__pitSettings = next;
+
+  const assignments = [
+    [".pit-panel-mode", next.mode || "append"],
+    [".pit-panel-style", next.translationStyle || "bar"],
+    [".pit-panel-provider", next.provider || "ollama"],
+    [".pit-panel-model-input", next.model || DEFAULT_OLLAMA.model],
+    [".pit-panel-base-url", next.baseUrl || DEFAULT_OLLAMA.baseUrl],
+    [".pit-panel-api-key", next.apiKey || ""],
+    [".pit-panel-font-size", normalizeFontSizePercent(next.translationFontSize)],
+    [".pit-panel-line-height", normalizeLineHeight(next.translationLineHeight)],
+    [".pit-panel-mark-style", next.markStyle || DEFAULT_OLLAMA.markStyle],
+    [".pit-panel-note-shortcut", normalizeNoteSaveShortcut(next.noteSaveShortcut)],
+    [".pit-panel-mark-color-light", getStoredMarkColor(next, "light")],
+    [".pit-panel-mark-color-dark", getStoredMarkColor(next, "dark")],
+    [".pit-panel-save-dir", next.saveDir || "page-notes"]
+  ];
+
+  for (const [selector, value] of assignments) {
+    const control = panel.querySelector(selector);
+    if (control && String(control.value) !== String(value)) control.value = value;
+  }
+
+  const shortReplace = panel.querySelector(".pit-panel-short-replace");
+  if (shortReplace) shortReplace.checked = Boolean(next.shortTextReplaceMode);
+  const autoOpen = panel.querySelector(".pit-panel-auto-open");
+  if (autoOpen) autoOpen.checked = next.autoOpenPanel !== false;
+
+  updateTypographyLabels(panel);
+  applyMarkColorToPage(next);
+  updatePanelModelFields(panel);
 }
 
 function activateReaderTab(panel, target) {
@@ -809,6 +1063,21 @@ function startOverviewAfterTranslation() {
   ensurePanelOverview(panel);
 }
 
+async function summarizePageForPopup(settings = {}) {
+  const page = getPageBundle();
+  const response = await sendRuntimeMessageWithTimeout({
+    type: "BUILD_ARTICLE_OVERVIEW",
+    page,
+    settings
+  }, OVERVIEW_TIMEOUT_MS, "总结生成超时，请稍后重试或切换更小的本地模型。");
+  if (!response?.ok) throw new Error(response?.error || "总结失败。");
+
+  const summary = response.overview || "文章脉络为空。";
+  lastSummaryText = summary;
+  prepareNoteTitle({ ...page, summary }, "", settings);
+  return { summary, message: "已生成总结，标题正在准备。" };
+}
+
 function readPanelSettings(panel) {
   const provider = panel.querySelector(".pit-panel-provider")?.value || "ollama";
   const selectedModel = provider === "ollama"
@@ -818,9 +1087,11 @@ function readPanelSettings(panel) {
     ...panel.__pitSettings,
     mode: panel.querySelector(".pit-panel-mode")?.value || "append",
     translationStyle: panel.querySelector(".pit-panel-style")?.value || "bar",
+    shortTextReplaceMode: panel.querySelector(".pit-panel-short-replace")?.checked === true,
     markStyle: panel.querySelector(".pit-panel-mark-style")?.value || DEFAULT_OLLAMA.markStyle,
-    markHighlightColor: normalizeColor(panel.querySelector(".pit-panel-mark-color")?.value || DEFAULT_OLLAMA.markHighlightColor),
-    autoSendMarkedToNote: panel.querySelector(".pit-panel-mark-to-note")?.checked !== false,
+    markHighlightColorLight: normalizeColor(panel.querySelector(".pit-panel-mark-color-light")?.value, DEFAULT_OLLAMA.markHighlightColorLight),
+    markHighlightColorDark: normalizeColor(panel.querySelector(".pit-panel-mark-color-dark")?.value, DEFAULT_OLLAMA.markHighlightColorDark),
+    noteSaveShortcut: normalizeNoteSaveShortcut(panel.querySelector(".pit-panel-note-shortcut")?.value),
     provider,
     model: selectedModel?.trim() || DEFAULT_OLLAMA.model,
     baseUrl: panel.querySelector(".pit-panel-base-url")?.value.trim() || DEFAULT_OLLAMA.baseUrl,
@@ -831,6 +1102,7 @@ function readPanelSettings(panel) {
     saveDir: panel.querySelector(".pit-panel-save-dir")?.value.trim() || "page-notes",
     summaryPrompt: ""
   };
+  settings.markHighlightColor = getMarkHighlightColor(settings);
   panel.__pitSettings = settings;
   return settings;
 }
@@ -891,6 +1163,7 @@ function choosePanelModel(models, preferredModel) {
 }
 
 function setPanelStatus(panel, text) {
+  if (!panel) return;
   const status = panel.querySelector(".pit-reader-status");
   if (status) status.textContent = text;
 }
@@ -983,6 +1256,10 @@ async function saveAskMarkdown(panel) {
       page: { ...getPageBundle(), summary: askMarkdown },
       note: getNoteMarkdown(panel).trim(),
       options: {
+        provider: settings.provider,
+        model: settings.model,
+        baseUrl: settings.baseUrl,
+        apiKey: settings.apiKey,
         saveDir: settings.saveDir,
         saveUrl: true,
         saveOriginal: false,
@@ -1013,6 +1290,10 @@ async function savePanelMarkdown(panel) {
       page: getPageBundle(),
       note: getNoteMarkdown(panel).trim(),
       options: {
+        provider: settings.provider,
+        model: settings.model,
+        baseUrl: settings.baseUrl,
+        apiKey: settings.apiKey,
         saveDir: settings.saveDir,
         saveUrl: panel.querySelector(".pit-save-url")?.checked !== false,
         saveOriginal: panel.querySelector(".pit-save-original")?.checked !== false,
@@ -1230,7 +1511,7 @@ function showSelectionToolbar() {
   const anchor = selection.anchorNode instanceof Element
     ? selection.anchorNode
     : selection.anchorNode?.parentElement;
-  if (anchor?.closest?.(`.${ASK_PANEL_CLASS}, .${SELECTION_TOOLBAR_CLASS}, textarea, input, select, button`)) {
+  if (anchor?.closest?.(`.${ASK_PANEL_CLASS}, .${SELECTION_TOOLBAR_CLASS}, .pit-mark-note-composer, textarea, input, select, button`)) {
     hideSelectionToolbar();
     return;
   }
@@ -1242,6 +1523,8 @@ function showSelectionToolbar() {
     return;
   }
 
+  capturePageSelectionSnapshot();
+
   let toolbar = document.querySelector(`.${SELECTION_TOOLBAR_CLASS}`);
   if (!toolbar) {
     toolbar = document.createElement("div");
@@ -1252,30 +1535,74 @@ function showSelectionToolbar() {
       '</button>',
       '<button class="pit-selection-action is-mark" data-action="mark" type="button" aria-label="标记选中内容" data-tooltip="标记">',
       '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h16"></path><path d="M7 16l8.5-8.5 3 3L10 19H7z"></path><path class="pit-selection-accent" d="M14 6l3 3"></path></svg>',
-      '</button>',
-      '<button class="pit-selection-action is-send" data-action="note" type="button" aria-label="发送到笔记" data-tooltip="发送到笔记">',
-      '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12h14"></path><path d="M13 6l6 6-6 6"></path><path class="pit-selection-accent" d="M4 18h6"></path></svg>',
       '</button>'
     ].join("");
     toolbar.addEventListener("mousedown", (event) => event.preventDefault());
     toolbar.addEventListener("click", (event) => {
       const action = event.target?.closest?.("button")?.dataset.action;
       if (action === "translate") translateSelectionText(toolbar.dataset.selectionText || "");
-      if (action === "mark") markSelectedTranslationText();
-      if (action === "note") appendSelectionToNote(toolbar.dataset.selectionText || "");
+      if (action === "mark") markSelectedTranslationText(toolbar.dataset.selectionText || "");
     });
     document.body.appendChild(toolbar);
   }
 
   toolbar.dataset.selectionText = text;
-  toolbar.style.left = `${Math.min(window.scrollX + lastMousePoint.x + 65, window.scrollX + window.innerWidth - 104)}px`;
-  toolbar.style.top = `${Math.max(window.scrollY + lastMousePoint.y + 15, window.scrollY + 8)}px`;
+  toolbar.style.left = `${Math.max(8, Math.min(lastMousePoint.x + 65, window.innerWidth - 112))}px`;
+  toolbar.style.top = `${Math.max(8, Math.min(lastMousePoint.y + 15, window.innerHeight - 38))}px`;
   toolbar.hidden = false;
 }
 
 function hideSelectionToolbar() {
   const toolbar = document.querySelector(`.${SELECTION_TOOLBAR_CLASS}`);
   if (toolbar) toolbar.hidden = true;
+}
+
+async function runReaderActionFromMessage(message) {
+  const action = message?.action;
+  const settings = { ...DEFAULT_OLLAMA, ...(message?.settings || {}) };
+  const selectedText = normalizeSelectedText(message?.selectionText || window.getSelection()?.toString() || "");
+  const panel = openAskPanel(settings, { focus: false });
+
+  if (action === "translate_current_page") {
+    activateReaderTab(panel, "translate");
+    setPanelStatus(panel, "正在翻译...");
+    const result = await translatePage(readPanelSettings(panel));
+    setPanelStatus(panel, result.message || "已开始翻译。");
+    return result;
+  }
+
+  if (action === "translate_selection") {
+    if (!selectedText) {
+      activateReaderTab(panel, "translate");
+      setPanelStatus(panel, "当前没有选中文本。");
+      return { message: "当前没有选中文本。" };
+    }
+    activateReaderTab(panel, "translate");
+    setPanelStatus(panel, "正在翻译选中内容...");
+    await translateSelectionText(selectedText);
+    setPanelStatus(panel, "已开始翻译选中内容。");
+    return { message: "已开始翻译选中内容。" };
+  }
+
+  if (action === "mark_selection") {
+    activateReaderTab(panel, "notes");
+    if (!selectedText) {
+      setPanelStatus(panel, "当前没有选中文本。");
+      return { message: "当前没有选中文本。" };
+    }
+    const marked = await markSelectedTranslationText(selectedText, readPanelSettings(panel));
+    const message = marked ? "已标记选中内容。" : "当前选区无法标记，请重新选择文本后再试。";
+    setPanelStatus(panel, message);
+    return { message };
+  }
+
+  if (action === "save_page") {
+    activateReaderTab(panel, "notes");
+    await savePanelMarkdown(panel);
+    return { message: "正在保存..." };
+  }
+
+  return { message: "未识别的操作。" };
 }
 
 async function translateSelectionText(text) {
@@ -1293,15 +1620,24 @@ async function translateSelectionText(text) {
 
   const run = { cancelled: false, controllers: new Set(), ports: new Set() };
   const renderer = createStreamRenderer(target, /[*_`\[\]]/.test(selected));
-  const protection = protectLinks(selected);
+  const protection = protectInlineTokens(protectLinks(selected));
 
   try {
     for (const textChunk of splitTextForTranslation(protection.text)) {
-      await streamOneParagraph(textChunk, settings, (chunk) => {
-        renderer.append(restoreProtectedLinks(chunk, protection.links));
-      }, run);
+      if (textChunk.text) {
+        if (isProtectedPlaceholderOnly(textChunk.text)) {
+          renderer.append(restoreInlineTokens(textChunk.text, protection));
+        } else {
+          await streamOneParagraph(textChunk.text, settings, (chunk) => {
+            renderer.append(restoreInlineTokens(chunk, protection));
+          }, run);
+        }
+      }
+      if (textChunk.separator) {
+        renderer.append(textChunk.separator);
+      }
     }
-    const finalText = restoreProtectedLinks(renderer.getText(), protection.links);
+    const finalText = restoreInlineTokens(renderer.getText(), protection);
     target.dataset.state = "done";
     renderer.finish(finalText);
   } catch (error) {
@@ -1313,68 +1649,661 @@ async function translateSelectionText(text) {
   }
 }
 
-async function markSelectedTranslationText() {
+async function markSelectedTranslationText(fallbackText = "", explicitSettings = null) {
+  const scrollPosition = capturePageScrollPosition();
   const selection = window.getSelection();
-  const selectedText = normalizeSelectedText(selection?.toString() || "");
-  if (!selection?.rangeCount || !selectedText) {
+  const currentText = normalizeSelectedText(selection?.toString() || "");
+  const selectedText = currentText || normalizeSelectedText(fallbackText || lastPageSelection?.text || "");
+  const range = getMarkableSelectionRange(selection, selectedText);
+  const sourceRect = getRangeVisualRect(range);
+  const toolbarMarkButton = document.querySelector(`.${SELECTION_TOOLBAR_CLASS} .pit-selection-action.is-mark`);
+  let didMark = false;
+  if (!range || !selectedText) {
     hideSelectionToolbar();
-    return;
+    return false;
   }
-  const range = selection.getRangeAt(0);
   const container = range.commonAncestorContainer instanceof Element
     ? range.commonAncestorContainer
     : range.commonAncestorContainer.parentElement;
-  if (container?.closest?.(`.${ASK_PANEL_CLASS}, .${SELECTION_TOOLBAR_CLASS}, textarea, input, select, button`)) {
+  if (container?.closest?.(`.${ASK_PANEL_CLASS}, .${SELECTION_TOOLBAR_CLASS}, .pit-mark-note-composer, textarea, input, select, button`)) {
     hideSelectionToolbar();
-    return;
+    return false;
   }
-  const settings = await getCurrentPanelSettings();
+  const settings = explicitSettings
+    ? { ...DEFAULT_OLLAMA, ...explicitSettings, noteSaveShortcut: normalizeNoteSaveShortcut(explicitSettings.noteSaveShortcut) }
+    : await getCurrentPanelSettings();
   const mark = document.createElement("span");
   mark.className = "pit-manual-mark";
+  mark.dataset.pitPageUrl = location.href;
   mark.dataset.pitMarkStyle = settings.markStyle || DEFAULT_OLLAMA.markStyle;
-  mark.style.setProperty("--pit-mark-highlight-color", settings.markHighlightColor || DEFAULT_OLLAMA.markHighlightColor);
+  mark.style.setProperty("--pit-mark-highlight-color", getMarkHighlightColor(settings));
   try {
     const content = range.extractContents();
     mark.appendChild(content);
     range.insertNode(mark);
     selection.removeAllRanges();
+    lastPageSelection = null;
+    didMark = true;
     setPanelStatus(document.querySelector(`.${ASK_PANEL_CLASS}`), "已标记选中内容。");
-    if (settings.autoSendMarkedToNote !== false) {
-      appendMarkedTextToNote(selectedText, settings);
-    }
+    const noteTarget = appendMarkedTextToNote(selectedText, settings);
+    showMarkedTextFeedback({
+      markedNode: mark,
+      sourceRect,
+      selectedText,
+      panel: noteTarget?.panel,
+      input: noteTarget?.input
+    });
+    showMarkButtonSuccess(toolbarMarkButton);
+    return true;
   } catch {
     setPanelStatus(document.querySelector(`.${ASK_PANEL_CLASS}`), "这段内容暂时无法标记。");
+    return false;
   } finally {
-    hideSelectionToolbar();
+    if (didMark && toolbarMarkButton) {
+      setTimeout(hideSelectionToolbar, 420);
+    } else {
+      hideSelectionToolbar();
+    }
+    restorePageScrollPosition(scrollPosition);
   }
+}
+
+function getRangeVisualRect(range) {
+  if (!range) return null;
+  const rects = Array.from(range.getClientRects ? range.getClientRects() : []);
+  const visibleRect = rects.find((rect) => rect.width > 0 && rect.height > 0);
+  if (visibleRect) return visibleRect;
+  const rect = range.getBoundingClientRect?.();
+  return rect && (rect.width || rect.height) ? rect : null;
+}
+
+function getMarkableSelectionRange(selection, selectedText) {
+  if (selection?.rangeCount && normalizeSelectedText(selection.toString() || "")) {
+    const currentRange = selection.getRangeAt(0);
+    lastPageSelection = { text: selectedText, range: currentRange.cloneRange() };
+    return currentRange;
+  }
+
+  const snapshot = lastPageSelection;
+  if (!snapshot?.range || !document.contains(snapshot.range.commonAncestorContainer)) return null;
+  if (selectedText && snapshot.text && selectedText !== snapshot.text) return null;
+  return snapshot.range.cloneRange();
+}
+
+function capturePageSelectionSnapshot() {
+  const selection = window.getSelection();
+  const text = normalizeSelectedText(selection?.toString() || "");
+  if (!selection?.rangeCount || !text) return;
+  const range = selection.getRangeAt(0);
+  const container = range.commonAncestorContainer instanceof Element
+    ? range.commonAncestorContainer
+    : range.commonAncestorContainer.parentElement;
+  if (container?.closest?.(`.${ASK_PANEL_CLASS}, .${SELECTION_TOOLBAR_CLASS}, .pit-mark-note-composer, textarea, input, select, button`)) return;
+  lastPageSelection = { text, range: range.cloneRange() };
 }
 
 function appendMarkedTextToNote(text, settings = undefined) {
   const selected = normalizeSelectedText(text);
-  if (!selected) return;
-  const marked = wrapMarkedNoteMarkdown(selected, settings);
-  appendMarkdownLineToNote(`- ${marked}`, settings, "已标记并发送到笔记，草稿已自动保存。");
+  if (!selected) return null;
+  return appendMarkdownLineToNote(formatMarkedTextMarkdown(selected), settings, "已标记并发送到笔记，草稿已自动保存。");
 }
 
-function wrapMarkedNoteMarkdown(text, settings = {}) {
-  const style = settings?.markStyle || DEFAULT_OLLAMA.markStyle;
-  const color = normalizeColor(settings?.markHighlightColor || DEFAULT_OLLAMA.markHighlightColor);
-  const css = [
-    `background-color: ${color}`,
-    "text-decoration: underline",
-    "text-decoration-thickness: 1.5px",
-    style === "bold" || style === "boldItalic" ? "font-weight: 700" : "",
-    style === "italic" || style === "boldItalic" ? "font-style: italic" : "",
-    style === "code" ? 'font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace' : ""
-  ].filter(Boolean).join("; ");
-  return `<span style="${css}">${escapeHtml(text)}</span>`;
+function handleHoverNotePointerOver(event) {
+  if (event.pointerType === "touch") return;
+  const composerUnderPointer = event.target?.closest?.(".pit-mark-note-composer");
+  if (composerUnderPointer) {
+    cancelHoverNoteHide();
+    return;
+  }
+  const target = getHoverNoteTarget(event.target);
+  clearInactiveHoverNoteTargets(target);
+  if (!target) {
+    if (event.target?.closest?.(".pit-mark-note-composer")) cancelHoverNoteHide();
+    return;
+  }
+  cancelHoverNoteHide();
+  const savedComposer = hoverNoteComposers.get(target);
+  if (savedComposer?.isConnected) {
+    cancelHoverNoteShow();
+    hoverNoteTarget = target;
+    hoverNoteComposer = savedComposer;
+    savedComposer.classList.add("is-target-hovered");
+    savedComposer.classList.remove("is-closed", "is-hiding");
+    savedComposer.hidden = false;
+    savedComposer.classList.add("is-visible");
+    positionHoverNoteComposer(savedComposer, target);
+    return;
+  }
+  if (target === hoverNoteTarget && hoverNoteComposer?.isConnected) {
+    hoverNoteComposer.classList.add("is-target-hovered");
+    positionHoverNoteComposer(hoverNoteComposer, target);
+    return;
+  }
+  if (hoverNoteComposer?.matches(":focus-within") || normalizeSelectedText(hoverNoteComposer?.querySelector(".pit-mark-note-input")?.value || "")) {
+    return;
+  }
+  scheduleHoverNoteShow(target);
+}
+
+function handleHoverNotePointerOut(event) {
+  if (event.pointerType === "touch") return;
+  const fromTarget = getHoverNoteTarget(event.target);
+  if (!fromTarget && !event.target?.closest?.(".pit-mark-note-composer")) return;
+  const next = event.relatedTarget instanceof Element ? event.relatedTarget : null;
+  const nextTarget = getHoverNoteTarget(next);
+  if (fromTarget && nextTarget === fromTarget) return;
+  const composer = fromTarget ? hoverNoteComposers.get(fromTarget) : hoverNoteComposer;
+  composer?.classList.remove("is-target-hovered");
+  if (next?.closest?.(".pit-mark-note-composer")) return;
+  cancelHoverNoteShow();
+  scheduleHoverNoteHide();
+}
+
+function clearInactiveHoverNoteTargets(activeTarget = null) {
+  hoverNoteComposers.forEach((composer, target) => {
+    if (target !== activeTarget) composer.classList.remove("is-target-hovered");
+  });
+}
+
+function getHoverNoteTarget(node) {
+  const element = node instanceof Element ? node : node?.parentElement;
+  if (!element) return null;
+  if (element.closest(`.${ASK_PANEL_CLASS}, .${SELECTION_TOOLBAR_CLASS}, .pit-mark-note-composer, textarea, input, select, button, nav, header, footer, aside, [contenteditable="true"]`)) {
+    return null;
+  }
+  const semanticTarget = element.closest([
+    '[data-testid="tweetText"]',
+    `.${TRANSLATION_CLASS}`,
+    `.${REPLACED_CLASS}`,
+    "p", "li", "blockquote", "figcaption", "dd", "dt", "td", "th",
+    "h1", "h2", "h3", "h4", "h5", "h6",
+    `.${PDF_BLOCK_CLASS}`
+  ].join(","));
+  const target = semanticTarget || findNearestReadableHoverBlock(element);
+  if (!(target instanceof HTMLElement) || !isVisible(target)) return null;
+  const text = normalizeSelectedText(target.innerText || target.textContent || "");
+  if (Array.from(text).length <= 18) return null;
+  return target;
+}
+
+function findNearestReadableHoverBlock(element) {
+  let current = element;
+  while (current instanceof HTMLElement && current !== document.body) {
+    if (!current.matches("article, main, section, [role='main'], [role='article']")) {
+      const style = window.getComputedStyle(current);
+      const isBlock = /^(block|flow-root|list-item|table-cell|flex|grid)$/.test(style.display);
+      const text = normalizeSelectedText(current.innerText || current.textContent || "");
+      if (isBlock && text.length >= 2 && text.length <= 2400 && isVisible(current)) return current;
+    }
+    current = current.parentElement;
+  }
+  return null;
+}
+
+function showHoverNoteComposer(target) {
+  cancelHoverNoteShow();
+  if (hoverNoteComposer && hoverNoteComposer !== hoverNoteComposers.get(target)) {
+    dismissHoverNoteComposer(hoverNoteComposer);
+  }
+  hoverNoteTarget = target;
+  hoverNoteComposer = hoverNoteComposers.get(target);
+  if (!hoverNoteComposer?.isConnected) {
+    const composer = createHoverNoteComposer(target);
+    hoverNoteComposer = composer;
+    hoverNoteComposers.set(target, composer);
+    hoverNoteResizeObserver?.observe(target);
+    document.body.appendChild(composer);
+  }
+  if (!hoverNoteComposer.dataset.savedNote
+    && !normalizeSelectedText(hoverNoteComposer.querySelector(".pit-mark-note-input")?.value || "")) {
+    hoverNoteComposer.dataset.selectedText = getSelectedTextForNoteTarget(target);
+  }
+  hoverNoteComposer.hidden = false;
+  hoverNoteComposer.classList.remove("is-visible", "is-hiding");
+  hoverNoteComposer.classList.add("is-target-hovered");
+  const composer = hoverNoteComposer;
+  requestAnimationFrame(() => composer.classList.add("is-visible"));
+  positionHoverNoteComposer(hoverNoteComposer, target);
+}
+
+function scheduleHoverNoteShow(target) {
+  if (hoverNoteShowTimer && hoverNoteTarget === target) return;
+  cancelHoverNoteShow();
+  hoverNoteTarget = target;
+  hoverNoteShowTimer = setTimeout(() => {
+    hoverNoteShowTimer = null;
+    if (hoverNoteTarget !== target || !target.matches(":hover")) return;
+    showHoverNoteComposer(target);
+  }, 100);
+}
+
+function cancelHoverNoteShow() {
+  if (!hoverNoteShowTimer) return;
+  clearTimeout(hoverNoteShowTimer);
+  hoverNoteShowTimer = null;
+}
+
+function createHoverNoteComposer(target, settings = undefined) {
+  const composer = document.createElement("div");
+  composer.className = "pit-mark-note-composer is-hover-note";
+  composer.dataset.pitPageUrl = location.href;
+  composer.dataset.selectedText = getSelectedTextForNoteTarget(target);
+  composer.dataset.savedNote = "";
+
+  const label = document.createElement("button");
+  label.className = "pit-mark-note-label";
+  label.type = "button";
+  label.setAttribute("aria-label", "添加笔记");
+
+  const field = document.createElement("div");
+  field.className = "pit-mark-note-field";
+
+  const fieldHeader = document.createElement("div");
+  fieldHeader.className = "pit-mark-note-header";
+
+  const dragHandle = document.createElement("span");
+  dragHandle.className = "pit-mark-note-drag-handle";
+  dragHandle.textContent = "笔记";
+
+  const closeButton = document.createElement("button");
+  closeButton.className = "pit-mark-note-close";
+  closeButton.type = "button";
+  closeButton.textContent = "关闭";
+  closeButton.setAttribute("aria-label", "收起笔记条");
+
+  const input = document.createElement("textarea");
+  input.className = "pit-mark-note-input";
+  input.rows = 1;
+  input.placeholder = "写一点笔记";
+  input.setAttribute("aria-label", "笔记");
+
+  const shortcutHint = document.createElement("span");
+  shortcutHint.className = "pit-mark-note-shortcut";
+  shortcutHint.setAttribute("aria-hidden", "true");
+
+  fieldHeader.append(dragHandle, closeButton);
+  field.append(fieldHeader, input, shortcutHint);
+  composer.append(label, field);
+
+  const submit = () => submitHoverNote(composer, settings);
+  const updateShortcutHint = () => {
+    const shortcut = normalizeNoteSaveShortcut(getLiveMarkedNoteSettings(settings).noteSaveShortcut);
+    shortcutHint.textContent = shortcut === "enter" ? "⏎" : "Cmd + ⏎";
+  };
+  input.addEventListener("keydown", (event) => {
+    if (shouldSaveMarkedNoteOnKeydown(event, getLiveMarkedNoteSettings(settings))) {
+      event.preventDefault();
+      submit();
+    }
+  });
+  input.addEventListener("input", () => {
+    const hasContent = Boolean(normalizeSelectedText(input.value));
+    composer.classList.toggle("is-writing", hasContent);
+    composer.classList.toggle("has-content", hasContent);
+    if (hasContent) composer.classList.remove("is-closed");
+    autosizeMarkedNoteInput(input);
+  });
+  input.addEventListener("focus", () => {
+    updateShortcutHint();
+    autosizeMarkedNoteInput(input);
+  });
+  input.addEventListener("blur", () => {
+    if (!normalizeSelectedText(input.value)) composer.classList.remove("is-writing");
+    autosizeMarkedNoteInput(input);
+    if (!normalizeSelectedText(input.value) && !composer.dataset.savedNote) {
+      scheduleHoverNoteHide();
+    }
+  });
+
+  const openNoteField = () => {
+    hoverNoteTarget = target;
+    hoverNoteComposer = composer;
+    composer.hidden = false;
+    composer.classList.add("is-visible", "is-target-hovered");
+    composer.classList.remove("is-closed");
+    focusWithoutPageScroll(input);
+    autosizeMarkedNoteInput(input);
+  };
+  label.addEventListener("focus", openNoteField);
+  label.addEventListener("click", openNoteField);
+  closeButton.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    composer.classList.add("is-closed");
+    composer.classList.remove("is-writing");
+    input.blur();
+  });
+  enableHoverNoteDragging(composer, field, dragHandle);
+  composer.addEventListener("mouseenter", () => {
+    cancelHoverNoteHide();
+    autosizeMarkedNoteInput(input);
+  });
+  composer.addEventListener("mouseleave", () => {
+    if (composer.classList.contains("is-dragging")) return;
+    dismissHoverNoteComposer(composer);
+  });
+  composer.addEventListener("focusin", () => {
+    cancelHoverNoteHide();
+    autosizeMarkedNoteInput(input);
+  });
+
+  updateShortcutHint();
+  autosizeMarkedNoteInput(input);
+  return composer;
+}
+
+function scheduleHoverNoteHide() {
+  cancelHoverNoteHide();
+  hoverNoteHideTimer = setTimeout(() => {
+    if (hoverNoteComposer?.matches(":hover, :focus-within")) return;
+    removeHoverNoteComposer();
+  }, 650);
+}
+
+function dismissHoverNoteComposer(composer) {
+  if (!(composer instanceof HTMLElement)) return;
+  cancelHoverNoteHide();
+  const hasSavedNote = Boolean(composer.dataset.savedNote);
+  const hasDraft = Boolean(normalizeSelectedText(composer.querySelector(".pit-mark-note-input")?.value || ""));
+  if (hasSavedNote) {
+    composer.querySelector(".pit-mark-note-input")?.blur();
+    composer.classList.remove("is-writing");
+    if (hoverNoteComposer === composer) {
+      hoverNoteComposer = null;
+      hoverNoteTarget = null;
+    }
+    return;
+  }
+  if (hasDraft) {
+    composer.querySelector(".pit-mark-note-input")?.blur();
+    composer.classList.add("has-content");
+    if (hoverNoteComposer === composer) {
+      hoverNoteComposer = null;
+      hoverNoteTarget = null;
+    }
+    return;
+  }
+  composer.classList.remove("is-writing");
+  if (hoverNoteComposer === composer) {
+    hoverNoteComposer = null;
+    hoverNoteTarget = null;
+  }
+}
+
+function findHoverNoteTargetForComposer(composer) {
+  for (const [target, candidate] of hoverNoteComposers) {
+    if (candidate === composer) return target;
+  }
+  return null;
+}
+
+function cancelHoverNoteHide() {
+  if (!hoverNoteHideTimer) return;
+  clearTimeout(hoverNoteHideTimer);
+  hoverNoteHideTimer = null;
+}
+
+function removeHoverNoteComposer(force = false) {
+  cancelHoverNoteShow();
+  cancelHoverNoteHide();
+  if (force) {
+    document.querySelectorAll(".pit-mark-note-composer.is-hover-note").forEach((composer) => composer.remove());
+    hoverNoteResizeObserver?.disconnect();
+    hoverNoteComposers.clear();
+  } else if (hoverNoteComposer) {
+    dismissHoverNoteComposer(hoverNoteComposer);
+  }
+  hoverNoteComposer = null;
+  hoverNoteTarget = null;
+}
+
+function syncMarkedNotesForCurrentUrl() {
+  const currentUrl = location.href;
+  document.querySelectorAll(".pit-manual-mark").forEach((mark) => {
+    const pageUrl = mark.dataset.pitPageUrl || currentUrl;
+    mark.dataset.pitPageUrl = pageUrl;
+    mark.classList.toggle("is-url-inactive", pageUrl !== currentUrl);
+  });
+  document.querySelectorAll(".pit-mark-note-composer").forEach((composer) => {
+    const pageUrl = composer.dataset.pitPageUrl || currentUrl;
+    composer.dataset.pitPageUrl = pageUrl;
+    composer.hidden = pageUrl !== currentUrl;
+  });
+}
+
+function submitHoverNote(composer, settings = undefined) {
+  if (!(composer instanceof HTMLElement)) return;
+  const input = composer.querySelector(".pit-mark-note-input");
+  const note = normalizeSelectedText(input?.value || "");
+  if (!note) {
+    composer.classList.add("is-empty");
+    setTimeout(() => composer.classList.remove("is-empty"), 900);
+    focusWithoutPageScroll(input);
+    return;
+  }
+
+  const oldNote = composer.dataset.savedNote || "";
+  const notePanelTarget = appendHoverNoteToPanel(note, composer.dataset.selectedText || "", settings, oldNote);
+  if (!notePanelTarget) return;
+  composer.classList.remove("is-empty");
+  composer.classList.add("has-note", "has-content", "is-sent");
+  composer.classList.remove("is-closed");
+  composer.dataset.savedNote = note;
+  composer.classList.remove("is-writing");
+  autosizeMarkedNoteInput(input);
+  const anchorTarget = findHoverNoteTargetForComposer(composer);
+  if (anchorTarget) positionHoverNoteComposer(composer, anchorTarget);
+  setTimeout(() => composer.classList.remove("is-sent"), 900);
+}
+
+function autosizeMarkedNoteInput(input) {
+  if (!(input instanceof HTMLTextAreaElement)) return;
+  input.style.height = "auto";
+  const maxHeight = Math.max(88, Math.min(320, Math.floor(window.innerHeight * 0.48)));
+  const nextHeight = Math.min(maxHeight, Math.max(30, input.scrollHeight));
+  input.style.height = `${nextHeight}px`;
+  input.style.overflowY = input.scrollHeight > maxHeight ? "auto" : "hidden";
+}
+
+function shouldSaveMarkedNoteOnKeydown(event, settings = {}) {
+  if (event.key !== "Enter" || event.isComposing) return false;
+  const shortcut = normalizeNoteSaveShortcut(settings.noteSaveShortcut);
+  if (shortcut === "enter") return !event.shiftKey && !event.metaKey && !event.ctrlKey && !event.altKey;
+  return (event.metaKey || event.ctrlKey) && !event.shiftKey && !event.altKey;
+}
+
+function getLiveMarkedNoteSettings(fallbackSettings = {}) {
+  const panel = document.querySelector(`.${ASK_PANEL_CLASS}`);
+  if (panel instanceof HTMLElement) {
+    return readPanelSettings(panel);
+  }
+  return { ...DEFAULT_OLLAMA, ...lastKnownSettings, ...fallbackSettings };
+}
+
+function positionHoverNoteComposer(composer, target) {
+  if (!(composer instanceof HTMLElement) || !(target instanceof HTMLElement)) return;
+  if (!target.isConnected) {
+    composer.remove();
+    hoverNoteResizeObserver?.unobserve(target);
+    hoverNoteComposers.delete(target);
+    return;
+  }
+  const rect = target.getBoundingClientRect();
+  const isInViewport = rect.bottom > 0
+    && rect.top < window.innerHeight
+    && rect.right > 0
+    && rect.left < window.innerWidth;
+  if (!isInViewport) {
+    composer.dataset.viewportHidden = "true";
+    composer.hidden = true;
+    return;
+  }
+  if (composer.dataset.viewportHidden === "true") {
+    delete composer.dataset.viewportHidden;
+    composer.hidden = false;
+  }
+  const buttonSize = composer.classList.contains("has-note") ? 24 : 18;
+  const gap = 8;
+  const left = Math.min(window.innerWidth - buttonSize - 8, Math.max(8, rect.right + gap));
+  const paragraphCenter = rect.top + rect.height / 2;
+  const top = Math.min(
+    window.innerHeight - buttonSize - 8,
+    Math.max(8, paragraphCenter - buttonSize / 2)
+  );
+  const noteWidth = Math.min(310, window.innerWidth - 32);
+  const spaceRight = window.innerWidth - (left + buttonSize + gap);
+  composer.classList.toggle("opens-below", spaceRight < noteWidth);
+  composer.style.left = `${Math.round(left)}px`;
+  composer.style.top = `${Math.round(top)}px`;
+}
+
+function enableHoverNoteDragging(composer, field, handle) {
+  let drag = null;
+
+  const move = (event) => {
+    if (!drag || event.pointerId !== drag.pointerId) return;
+    event.preventDefault();
+    const left = Math.min(
+      window.innerWidth - drag.width - 8,
+      Math.max(8, drag.left + event.clientX - drag.startX)
+    );
+    const top = Math.min(
+      window.innerHeight - drag.height - 8,
+      Math.max(8, drag.top + event.clientY - drag.startY)
+    );
+    composer.style.setProperty("--pit-note-drag-left", `${Math.round(left)}px`);
+    composer.style.setProperty("--pit-note-drag-top", `${Math.round(top)}px`);
+  };
+
+  const stop = (event) => {
+    if (!drag || event.pointerId !== drag.pointerId) return;
+    drag = null;
+    composer.classList.remove("is-dragging");
+    composer.classList.add("is-visible");
+    if (normalizeSelectedText(composer.querySelector(".pit-mark-note-input")?.value || "")) {
+      composer.classList.add("has-content");
+    }
+    handle.releasePointerCapture?.(event.pointerId);
+    document.removeEventListener("pointermove", move);
+    document.removeEventListener("pointerup", stop);
+    document.removeEventListener("pointercancel", stop);
+  };
+
+  handle.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const rect = field.getBoundingClientRect();
+    drag = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      left: rect.left,
+      top: rect.top,
+      width: rect.width,
+      height: rect.height
+    };
+    composer.classList.add("is-dragged", "is-dragging");
+    composer.classList.remove("is-closed");
+    composer.style.setProperty("--pit-note-drag-left", `${Math.round(rect.left)}px`);
+    composer.style.setProperty("--pit-note-drag-top", `${Math.round(rect.top)}px`);
+    handle.setPointerCapture?.(event.pointerId);
+    document.addEventListener("pointermove", move, { passive: false });
+    document.addEventListener("pointerup", stop);
+    document.addEventListener("pointercancel", stop);
+  });
+}
+
+function scheduleHoverNotePositionSync() {
+  if (hoverNotePositionFrame) return;
+  hoverNotePositionFrame = requestAnimationFrame(() => {
+    hoverNotePositionFrame = 0;
+    hoverNoteComposers.forEach((composer, target) => {
+      if (!composer.isConnected || !target.isConnected) {
+        composer.remove();
+        hoverNoteResizeObserver?.unobserve(target);
+        hoverNoteComposers.delete(target);
+        return;
+      }
+      positionHoverNoteComposer(composer, target);
+    });
+  });
+}
+
+function getSelectedTextForNoteTarget(target) {
+  const selection = window.getSelection();
+  if (!selection?.rangeCount) return "";
+  const selectedText = normalizeSelectedText(selection.toString() || "");
+  if (!selectedText) return "";
+  const range = selection.getRangeAt(0);
+  if (!target.contains(range.startContainer) || !target.contains(range.endContainer)) return "";
+  return selectedText;
+}
+
+function appendHoverNoteToPanel(note, selectedText, settings = undefined, oldNote = "") {
+  const value = normalizeSelectedText(note);
+  const selection = normalizeSelectedText(selectedText);
+  if (!value) return null;
+  const scrollPosition = capturePageScrollPosition();
+  const panel = openAskPanel(settings);
+  activateReaderTab(panel, "notes");
+  const input = panel.querySelector(".pit-panel-note");
+  if (!input) return null;
+  panel.dataset.appendingSelection = "true";
+  editNoteMarkdown(panel);
+  panel.dataset.appendingSelection = "false";
+  const result = insertHoverNote(input.value, selection, value, oldNote);
+  input.value = result.markdown;
+  input.selectionStart = input.selectionEnd = result.cursor;
+  input.scrollTop = input.scrollHeight;
+  scrollNotesAreaToBottom(panel);
+  persistNoteDraft(panel);
+  setPanelStatus(panel, selection ? "笔记和选中文字已发送，正在清洗重复内容..." : "笔记已发送，正在清洗重复内容...");
+  requestNoteCleaning(panel, settings);
+  restorePageScrollPosition(scrollPosition);
+  showPanelReceiveFeedback(panel, input);
+  return { panel, input };
+}
+
+function insertHoverNote(markdown, selectedText, note, oldNote = "") {
+  const source = String(markdown || "");
+  const selectionLine = selectedText
+    ? `- 选中内容：${escapeMarkdownInline(selectedText).replace(/\n+/g, " / ")}`
+    : "";
+  const notePrefix = selectionLine ? "  - 笔记：" : "- 笔记：";
+  const noteLine = `${notePrefix}${escapeMarkdownInline(note).replace(/\n+/g, " / ")}`;
+  const oldNoteLine = oldNote ? `${notePrefix}${escapeMarkdownInline(oldNote).replace(/\n+/g, " / ")}` : "";
+
+  if (oldNoteLine) {
+    const contextIndex = selectionLine ? source.lastIndexOf(selectionLine) : 0;
+    const searchStart = contextIndex >= 0 ? contextIndex : 0;
+    const oldIndex = source.indexOf(oldNoteLine, searchStart);
+    const nextParentIndex = selectionLine ? source.indexOf("\n- ", searchStart + selectionLine.length) : -1;
+    if (oldIndex >= 0 && (nextParentIndex < 0 || oldIndex < nextParentIndex)) {
+      const markdownValue = `${source.slice(0, oldIndex)}${noteLine}${source.slice(oldIndex + oldNoteLine.length)}`;
+      return { markdown: markdownValue, cursor: oldIndex + noteLine.length };
+    }
+  }
+
+  const prefix = source.trim() ? (source.endsWith("\n") ? "\n" : "\n\n") : "";
+  const insertion = selectionLine
+    ? `${prefix}${selectionLine}\n${noteLine}\n`
+    : `${prefix}${noteLine}\n`;
+  return { markdown: `${source}${insertion}`, cursor: source.length + insertion.length };
+}
+
+function formatMarkedTextMarkdown(text) {
+  const value = normalizeSelectedText(text);
+  if (!value) return "";
+  return `- 标记内容：${escapeMarkdownInline(value).replace(/\n+/g, " / ")}`;
 }
 
 async function getCurrentPanelSettings() {
   const panel = document.querySelector(`.${ASK_PANEL_CLASS}`);
   if (panel) return readPanelSettings(panel);
   const stored = await chrome.storage.sync.get(DEFAULT_OLLAMA);
-  return { ...DEFAULT_OLLAMA, ...stored };
+  lastKnownSettings = { ...DEFAULT_OLLAMA, ...stored };
+  return lastKnownSettings;
 }
 
 function getCurrentSelectionRange() {
@@ -1407,19 +2336,9 @@ function insertSelectionTranslationTarget(range, target) {
   }
 }
 
-function appendSelectionToNote(text, settings = undefined) {
-  const selected = normalizeSelectedText(text);
-  if (!selected) return;
-  const summary = selected
-    .split(/\n+/)
-    .map((line) => `- *${escapeMarkdownInline(normalizeText(line))}*`)
-    .join("\n");
-  appendMarkdownLineToNote(summary, settings, "已发送到笔记，草稿已自动保存。");
-}
-
 function appendMarkdownLineToNote(markdown, settings = undefined, status = "已发送到笔记，草稿已自动保存。") {
   const value = String(markdown || "").trim();
-  if (!value) return;
+  if (!value) return null;
   const scrollPosition = capturePageScrollPosition();
   const panel = openAskPanel(settings);
   activateReaderTab(panel, "notes");
@@ -1428,25 +2347,144 @@ function appendMarkdownLineToNote(markdown, settings = undefined, status = "已�
   editNoteMarkdown(panel);
   panel.dataset.appendingSelection = "false";
   const insertion = `${input.value.trim() ? "\n\n" : ""}${value}\n`;
-  const start = input.selectionStart ?? input.value.length;
-  const end = input.selectionEnd ?? input.value.length;
+  const start = input.value.length;
+  const end = input.value.length;
   input.value = `${input.value.slice(0, start)}${insertion}${input.value.slice(end)}`;
   input.selectionStart = input.selectionEnd = start + insertion.length;
+  input.scrollTop = input.scrollHeight;
+  scrollNotesAreaToBottom(panel);
   focusWithoutPageScroll(input);
   persistNoteDraft(panel);
-  setPanelStatus(panel, status);
+  setPanelStatus(panel, status.replace(/草稿已自动保存。?$/, "正在清洗重复内容..."));
+  requestNoteCleaning(panel, settings);
   hideSelectionToolbar();
   restorePageScrollPosition(scrollPosition);
+  return { panel, input };
+}
+
+const noteCleaningStates = new WeakMap();
+
+function requestNoteCleaning(panel, settings = undefined) {
+  if (!(panel instanceof HTMLElement)) return;
+  const state = noteCleaningStates.get(panel) || { running: false, pending: false, settings: undefined };
+  state.pending = true;
+  state.settings = settings;
+  noteCleaningStates.set(panel, state);
+  if (!state.running) runNoteCleaning(panel, state);
+}
+
+async function runNoteCleaning(panel, state) {
+  state.running = true;
+  try {
+    while (state.pending && panel.isConnected) {
+      state.pending = false;
+      const input = panel.querySelector(".pit-panel-note");
+      const original = input?.value.trim() || "";
+      if (!original) continue;
+
+      const response = await sendRuntimeMessageWithTimeout({
+        type: "CLEAN_NOTE_CONTENT",
+        note: original,
+        settings: state.settings
+          ? { ...DEFAULT_OLLAMA, ...state.settings }
+          : readPanelSettings(panel)
+      }, 30000, "笔记清洗超时。");
+
+      if (!response?.ok) throw new Error(response?.error || "笔记清洗失败。");
+      if (!input || input.value.trim() !== original) {
+        state.pending = true;
+        continue;
+      }
+
+      const cleaned = String(response.cleanedNote || "").trim();
+      if (cleaned && cleaned !== original) {
+        input.value = `${cleaned}\n`;
+        input.selectionStart = input.selectionEnd = input.value.length;
+        persistNoteDraft(panel);
+        setPanelStatus(panel, "笔记已清洗，重复内容已删除。");
+      } else {
+        setPanelStatus(panel, "笔记已检查，没有发现重复内容。");
+      }
+    }
+  } catch (error) {
+    setPanelStatus(panel, `${humanizeRuntimeError(error)} 原始笔记已保留。`);
+  } finally {
+    state.running = false;
+    if (state.pending && panel.isConnected) runNoteCleaning(panel, state);
+  }
+}
+
+function showMarkedTextFeedback({ markedNode, sourceRect, selectedText, panel, input }) {
+  showMarkedNodeConfirmation(markedNode);
+  showPanelReceiveFeedback(panel, input);
+  flyMarkedTextToPanel(sourceRect, selectedText, panel, input);
+}
+
+function showMarkedNodeConfirmation(markedNode) {
+  if (!(markedNode instanceof HTMLElement)) return;
+  markedNode.classList.add("is-confirmed");
+  setTimeout(() => markedNode.classList.remove("is-confirmed"), 1200);
+}
+
+function showPanelReceiveFeedback(panel, input) {
+  if (panel instanceof HTMLElement) {
+    panel.classList.remove("is-receiving-mark");
+    void panel.offsetWidth;
+    panel.classList.add("is-receiving-mark");
+    setTimeout(() => panel.classList.remove("is-receiving-mark"), 1200);
+  }
+  if (input instanceof HTMLElement) {
+    input.classList.remove("is-receiving-mark");
+    void input.offsetWidth;
+    input.classList.add("is-receiving-mark");
+    input.scrollTop = input.scrollHeight;
+    scrollNotesAreaToBottom(panel);
+    setTimeout(() => input.classList.remove("is-receiving-mark"), 1600);
+  }
+}
+
+function scrollNotesAreaToBottom(panel) {
+  const area = panel?.querySelector?.('.pit-reader-panel-section[data-reader-panel="notes"]');
+  if (area) area.scrollTop = area.scrollHeight;
+}
+
+function flyMarkedTextToPanel(sourceRect, selectedText, panel, input) {
+  if (!sourceRect || window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches) return;
+  const target = input instanceof HTMLElement ? input : panel;
+  if (!(target instanceof HTMLElement)) return;
+  const targetRect = target.getBoundingClientRect();
+  if (!targetRect.width || !targetRect.height) return;
+  const flyout = document.createElement("div");
+  flyout.className = "pit-mark-flyout";
+  flyout.textContent = compactFeedbackText(selectedText);
+  const startX = sourceRect.left + Math.min(sourceRect.width / 2, 120);
+  const startY = sourceRect.top + Math.min(sourceRect.height / 2, 24);
+  const endX = targetRect.left + Math.min(targetRect.width - 28, Math.max(28, targetRect.width * 0.68));
+  const endY = targetRect.top + Math.min(targetRect.height - 28, Math.max(28, targetRect.height * 0.82));
+  flyout.style.left = `${startX}px`;
+  flyout.style.top = `${startY}px`;
+  flyout.style.setProperty("--pit-fly-x", `${endX - startX}px`);
+  flyout.style.setProperty("--pit-fly-y", `${endY - startY}px`);
+  document.body.appendChild(flyout);
+  requestAnimationFrame(() => flyout.classList.add("is-flying"));
+  setTimeout(() => flyout.remove(), 720);
+}
+
+function compactFeedbackText(text) {
+  const chars = Array.from(normalizeSelectedText(text));
+  return chars.length > 24 ? `${chars.slice(0, 24).join("")}...` : chars.join("");
+}
+
+function showMarkButtonSuccess(button) {
+  if (!(button instanceof HTMLElement)) return;
+  button.dataset.feedback = "success";
+  setTimeout(() => {
+    if (button.dataset.feedback === "success") delete button.dataset.feedback;
+  }, 520);
 }
 
 function normalizeSelectedText(text) {
-  return String(text || "")
-    .replace(/\r/g, "")
-    .split("\n")
-    .map((line) => line.replace(/[ \t]+/g, " ").trim())
-    .filter(Boolean)
-    .join("\n")
-    .trim();
+  return normalizeTextPreserveBreaks(text);
 }
 
 function persistPanelSettings(settings) {
@@ -1456,9 +2494,12 @@ function persistPanelSettings(settings) {
     provider: settings.provider,
     mode: settings.mode,
     translationStyle: settings.translationStyle,
+    shortTextReplaceMode: settings.shortTextReplaceMode,
     markStyle: settings.markStyle,
     markHighlightColor: settings.markHighlightColor,
-    autoSendMarkedToNote: settings.autoSendMarkedToNote,
+    markHighlightColorLight: settings.markHighlightColorLight,
+    markHighlightColorDark: settings.markHighlightColorDark,
+    noteSaveShortcut: normalizeNoteSaveShortcut(settings.noteSaveShortcut),
     model: settings.model,
     baseUrl: settings.baseUrl,
     apiKey: settings.apiKey,
@@ -1633,9 +2674,111 @@ function normalizeLineHeight(value) {
   return Math.min(1.9, Math.max(1.1, Math.round(number * 100) / 100));
 }
 
-function normalizeColor(value) {
+function normalizeNoteSaveShortcut(value) {
+  return value === "cmdEnter" ? "cmdEnter" : "enter";
+}
+
+function normalizeColor(value, fallback = DEFAULT_OLLAMA.markHighlightColorLight) {
   const text = String(value || "").trim();
-  return /^#[0-9a-fA-F]{6}$/.test(text) ? text : DEFAULT_OLLAMA.markHighlightColor;
+  return /^#[0-9a-fA-F]{6}$/.test(text) ? text : fallback;
+}
+
+function getStoredMarkColor(settings = {}, theme = "light") {
+  if (theme === "dark") {
+    return normalizeColor(settings.markHighlightColorDark, DEFAULT_OLLAMA.markHighlightColorDark);
+  }
+  return normalizeColor(
+    settings.markHighlightColorLight || settings.markHighlightColor,
+    DEFAULT_OLLAMA.markHighlightColorLight
+  );
+}
+
+function getMarkHighlightColor(settings = {}) {
+  const theme = detectPageTheme();
+  return getStoredMarkColor(settings, theme);
+}
+
+function detectPageTheme() {
+  const themeHint = [
+    document.documentElement?.dataset?.theme,
+    document.body?.dataset?.theme,
+    document.documentElement?.className,
+    document.body?.className,
+    document.documentElement?.getAttribute?.("color-scheme"),
+    document.documentElement?.style?.colorScheme
+  ].join(" ").toLowerCase();
+
+  if (/\bdark\b|theme-dark|dark-mode|night/.test(themeHint)) return "dark";
+  if (/\blight\b|theme-light|light-mode/.test(themeHint)) return "light";
+
+  const background = getEffectivePageBackground();
+  if (background) {
+    return getRelativeLuminance(background) < 0.48 ? "dark" : "light";
+  }
+
+  return window.matchMedia?.("(prefers-color-scheme: dark)")?.matches ? "dark" : "light";
+}
+
+function getEffectivePageBackground() {
+  const candidates = [document.body, document.documentElement];
+  for (const node of candidates) {
+    const parsed = parseCssRgb(getComputedStyle(node).backgroundColor);
+    if (parsed && parsed.a > 0.05) return parsed;
+  }
+  return null;
+}
+
+function parseCssRgb(value) {
+  const match = String(value || "").match(/rgba?\(([^)]+)\)/i);
+  if (!match) return null;
+  const parts = match[1].split(/,\s*|\s+/).filter((part) => part && part !== "/");
+  const [r, g, b] = parts.map((part) => Number.parseFloat(part));
+  if (![r, g, b].every(Number.isFinite)) return null;
+  const a = Number.isFinite(Number.parseFloat(parts[3])) ? Number.parseFloat(parts[3]) : 1;
+  return { r, g, b, a };
+}
+
+function getRelativeLuminance({ r, g, b }) {
+  const [sr, sg, sb] = [r, g, b].map((channel) => {
+    const value = Math.min(255, Math.max(0, channel)) / 255;
+    return value <= 0.03928 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+  });
+  return 0.2126 * sr + 0.7152 * sg + 0.0722 * sb;
+}
+
+function initMarkThemeWatcher() {
+  lastDetectedPageTheme = detectPageTheme();
+  window.matchMedia?.("(prefers-color-scheme: dark)")?.addEventListener?.("change", refreshMarkColorsForCurrentTheme);
+  setInterval(() => {
+    const theme = detectPageTheme();
+    if (theme === lastDetectedPageTheme) return;
+    lastDetectedPageTheme = theme;
+    refreshMarkColorsForCurrentTheme();
+  }, 2000);
+}
+
+function initSettingsSyncWatcher() {
+  chrome.storage?.onChanged?.addListener?.((changes, areaName) => {
+    if (areaName !== "sync") return;
+    const settings = {};
+    for (const [key, change] of Object.entries(changes || {})) {
+      if (key in DEFAULT_OLLAMA || key === "saveDir" || key === "apiKey" || key === "summaryPrompt") {
+        settings[key] = change.newValue;
+      }
+    }
+    if (Object.keys(settings).length) {
+      lastKnownSettings = { ...lastKnownSettings, ...settings };
+    }
+    const panel = document.querySelector(`.${ASK_PANEL_CLASS}`);
+    if (!(panel instanceof HTMLElement)) return;
+    applyExternalSettingsToPanel(panel, settings);
+  });
+}
+
+async function refreshMarkColorsForCurrentTheme() {
+  const panel = document.querySelector(`.${ASK_PANEL_CLASS}`);
+  const settings = panel ? readPanelSettings(panel) : await getCurrentPanelSettings();
+  applyMarkColorToPage(settings);
 }
 
 async function loadPanelOverview(panel) {
@@ -1646,8 +2789,28 @@ async function loadPanelOverview(panel) {
     settings: readPanelSettings(panel)
   }, OVERVIEW_TIMEOUT_MS, "文章脉络生成超时，请稍后重试或切换更小的本地模型。");
   if (!response?.ok) throw new Error(response?.error || "生成文章脉络失败。");
-  panel.querySelector(".pit-ask-overview").innerHTML = renderMiniMarkdown(response.overview || "文章脉络为空。");
+  const overviewMarkdown = response.overview || "文章脉络为空。";
+  lastSummaryText = overviewMarkdown;
+  panel.querySelector(".pit-ask-overview").innerHTML = renderMiniMarkdown(overviewMarkdown);
+  prepareNoteTitle({ ...page, summary: overviewMarkdown }, getNoteMarkdown(panel).trim(), readPanelSettings(panel));
   scrollAskAreaToTop(panel);
+}
+
+function prepareNoteTitle(page, note, settings) {
+  sendRuntimeMessageWithTimeout({
+    type: "GENERATE_NOTE_TITLE",
+    page,
+    note,
+    settings
+  }, 15000, "标题生成超时。")
+    .then((response) => {
+      if (response?.ok && response.noteTitle) {
+        lastNoteTitle = response.noteTitle;
+      }
+    })
+    .catch((error) => {
+      console.warn("[PIT] note title preparation failed", error);
+    });
 }
 
 function sendRuntimeMessageWithTimeout(message, timeoutMs, timeoutMessage) {
@@ -1823,14 +2986,241 @@ function humanizeSummaryError(error) {
   return `总结失败：${message.slice(0, 80)}`;
 }
 
+// ─── PDF 内容抽取 ─────────────────────────────────────────────
+async function ensurePdfContentSections() {
+  const sources = collectPdfSources();
+  if (!sources.length) return { loaded: 0, message: "" };
+
+  let loaded = 0;
+  let failed = 0;
+  for (const source of sources.slice(0, MAX_PDFS_PER_PAGE)) {
+    if (findPdfContentSection(source.url)) {
+      loaded += 1;
+      continue;
+    }
+
+    try {
+      const text = await extractPdfTextFromUrl(source.url);
+      const paragraphs = splitPdfTextIntoParagraphs(text);
+      if (!paragraphs.length) {
+        failed += 1;
+        continue;
+      }
+      insertPdfContentSection(source, paragraphs);
+      loaded += 1;
+    } catch (error) {
+      failed += 1;
+      console.warn("[PIT] PDF extraction failed", source.url, error);
+    }
+  }
+
+  return {
+    loaded,
+    message: loaded
+      ? `已读取 ${loaded} 个 PDF。`
+      : (failed ? "发现 PDF，但无法读取其中的文字。" : "")
+  };
+}
+
+function collectPdfSources() {
+  const sources = [];
+  const seen = new Set();
+  const candidates = Array.from(document.querySelectorAll("a[href], iframe[src], embed[src], object[data]"));
+
+  for (const element of candidates) {
+    const rawUrl = element.getAttribute("href") || element.getAttribute("src") || element.getAttribute("data") || "";
+    const type = element.getAttribute("type") || "";
+    const url = normalizePdfUrl(rawUrl);
+    if (!url) continue;
+    if (!/\.pdf(?:[?#]|$)/i.test(url) && !/application\/pdf/i.test(type)) continue;
+    if (seen.has(url)) continue;
+    seen.add(url);
+    sources.push({
+      url,
+      element,
+      title: getPdfSourceTitle(element, url)
+    });
+  }
+
+  if (/\.pdf(?:[?#]|$)/i.test(location.href)) {
+    const url = normalizePdfUrl(location.href);
+    if (url && !seen.has(url)) {
+      sources.unshift({ url, element: document.body, title: document.title || getFileNameFromUrl(url) || "PDF" });
+    }
+  }
+
+  return sources;
+}
+
+function normalizePdfUrl(rawUrl) {
+  const value = String(rawUrl || "").trim();
+  if (!value || value.startsWith("javascript:") || value.startsWith("data:")) return "";
+  try {
+    const url = new URL(value, location.href);
+    return url.href;
+  } catch {
+    return "";
+  }
+}
+
+function findPdfContentSection(url) {
+  return Array.from(document.querySelectorAll(`.${PDF_SECTION_CLASS}`))
+    .find((section) => section.getAttribute(PDF_SOURCE_ATTR) === url) || null;
+}
+
+function getPdfSourceTitle(element, url) {
+  const label = normalizeText(element?.innerText || element?.getAttribute?.("title") || element?.getAttribute?.("aria-label") || "");
+  return label || getFileNameFromUrl(url) || "PDF";
+}
+
+function getFileNameFromUrl(url) {
+  try {
+    const pathname = new URL(url).pathname;
+    return decodeURIComponent(pathname.split("/").filter(Boolean).pop() || "");
+  } catch {
+    return "";
+  }
+}
+
+async function extractPdfTextFromUrl(url) {
+  let buffer = null;
+  try {
+    const response = await fetch(url, { credentials: "include" });
+    if (!response.ok) throw new Error(`PDF 下载失败：${response.status}`);
+    buffer = await response.arrayBuffer();
+  } catch (error) {
+    buffer = await fetchPdfBufferFromBackground(url, error);
+  }
+  return extractPdfTextWithFrame(buffer);
+}
+
+async function fetchPdfBufferFromBackground(url, originalError) {
+  const response = await chrome.runtime.sendMessage({ type: "FETCH_PDF_AS_BASE64", url });
+  if (!response?.ok) {
+    throw new Error(response?.error || originalError?.message || "PDF 下载失败。");
+  }
+  return base64ToArrayBuffer(response.base64 || "");
+}
+
+function base64ToArrayBuffer(base64) {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return bytes.buffer;
+}
+
+async function extractPdfTextWithFrame(buffer) {
+  const frame = await getPdfExtractorFrame();
+  const requestId = `pdf_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error("PDF 文本读取超时。"));
+    }, 30000);
+
+    function cleanup() {
+      clearTimeout(timer);
+      window.removeEventListener("message", onMessage);
+    }
+
+    function onMessage(event) {
+      const message = event.data || {};
+      if (message.type !== "PIT_EXTRACT_PDF_TEXT_RESULT" || message.requestId !== requestId) return;
+      cleanup();
+      if (message.ok) resolve(message.text || "");
+      else reject(new Error(message.error || "PDF 文本读取失败。"));
+    }
+
+    window.addEventListener("message", onMessage);
+    frame.contentWindow.postMessage({
+      type: "PIT_EXTRACT_PDF_TEXT",
+      requestId,
+      buffer
+    }, "*", [buffer]);
+  });
+}
+
+function getPdfExtractorFrame() {
+  if (pdfExtractorFramePromise) return pdfExtractorFramePromise;
+
+  pdfExtractorFramePromise = new Promise((resolve, reject) => {
+    const frame = document.createElement("iframe");
+    frame.src = chrome.runtime.getURL("pdf-extractor.html");
+    frame.hidden = true;
+    frame.style.display = "none";
+    frame.onload = () => resolve(frame);
+    frame.onerror = () => reject(new Error("PDF 读取器加载失败。"));
+    document.documentElement.appendChild(frame);
+  });
+
+  return pdfExtractorFramePromise;
+}
+
+function splitPdfTextIntoParagraphs(text) {
+  return String(text || "")
+    .replace(/\r/g, "")
+    .split(/\n{2,}|\n(?=第\s*\d+\s*页\b)/)
+    .flatMap((part) => splitLongPdfParagraph(part.trim()))
+    .map((part) => normalizeTextPreserveBreaks(part))
+    .filter((part) => part.length >= 8 && shouldTranslateToSimplifiedChinese(part))
+    .slice(0, MAX_PDF_PARAGRAPHS_PER_FILE);
+}
+
+function splitLongPdfParagraph(text) {
+  if (!text) return [];
+  if (text.length <= 900) return [text];
+  const chunks = [];
+  let current = "";
+  const sentences = text.match(/[^.!?。！？;；]+[.!?。！？;；]?\s*|[^.!?。！？;；]+$/g) || [text];
+  for (const sentence of sentences) {
+    if ((current + sentence).length <= 900) {
+      current += sentence;
+    } else {
+      if (current.trim()) chunks.push(current.trim());
+      current = sentence;
+    }
+  }
+  if (current.trim()) chunks.push(current.trim());
+  return chunks;
+}
+
+function insertPdfContentSection(source, paragraphs) {
+  const section = document.createElement("section");
+  section.className = PDF_SECTION_CLASS;
+  section.setAttribute(PDF_SOURCE_ATTR, source.url);
+
+  const heading = document.createElement("h2");
+  heading.textContent = `PDF 内容：${source.title}`;
+  section.appendChild(heading);
+
+  for (const paragraph of paragraphs) {
+    const node = document.createElement("p");
+    node.className = PDF_BLOCK_CLASS;
+    node.textContent = paragraph;
+    section.appendChild(node);
+  }
+
+  const target = source.element?.closest?.("a, iframe, embed, object, p, li, div, section, article") || source.element;
+  if (target?.parentElement) {
+    target.insertAdjacentElement("afterend", section);
+  } else {
+    document.body.appendChild(section);
+  }
+}
+
 // ─── 格式转换（HTML ↔ Markdown）──────────────────────────────
 function hasFormatting(element) {
   return element.querySelector("strong, b, em, i, u, code, a") !== null;
 }
 
 function htmlToMarkdown(html) {
-  return normalizeText(
+  return normalizeTextPreserveBreaks(
     html
+      .replace(/<br\s*\/?>/gi, "\n")
+      .replace(/<\/(?:p|div|li|h[1-6]|blockquote|figcaption|dd|dt|td|th|tr|section|article)>/gi, "\n\n")
       .replace(/<strong[^>]*>([\s\S]*?)<\/strong>/gi, "**$1**")
       .replace(/<b[^>]*>([\s\S]*?)<\/b>/gi,           "**$1**")
       .replace(/<em[^>]*>([\s\S]*?)<\/em>/gi,         "*$1*")
@@ -1848,21 +3238,24 @@ function markdownToHtml(md) {
     .replace(/\*(.*?)\*/g,     "<em>$1</em>")
     .replace(/_(.*?)_/g,       "<u>$1</u>")
     .replace(/`(.*?)`/g,       "<code>$1</code>")
-    .replace(/\[(.*?)\]\((.*?)\)/g, '<a href="$2" target="_blank">$1</a>');
+    .replace(/\[(.*?)\]\((.*?)\)/g, '<a href="$2" target="_blank">$1</a>')
+    .replace(/\n/g, "<br>");
 }
 
 // ─── 段落收集 ─────────────────────────────────────────────────
 function collectBlocks() {
   const seen = new Set();
-  return Array.from(document.querySelectorAll(BLOCK_SELECTOR))
+  const candidates = Array.from(document.querySelectorAll(BLOCK_SELECTOR))
     .filter((el) => {
       if (seen.has(el)) return false;
       seen.add(el);
       return isCandidateBlock(el);
-    })
+    });
+
+  return removeOverlappingCandidateBlocks(addCoverageFallbackBlock(addVisibleTextFallbackCandidates(candidates)))
     .map((el) => {
       const hasFormat = hasFormatting(el);
-      const text      = hasFormat ? htmlToMarkdown(el.innerHTML) : normalizeTextPreserveBreaks(el.innerText);
+      const text      = extractBlockText(el);
       return { element: el, text, hasFormat };
     })
     .filter((item) => shouldTranslateToSimplifiedChinese(item.text))
@@ -1871,12 +3264,14 @@ function collectBlocks() {
 
 function collectBundleBlocks() {
   const seen = new Set();
-  return Array.from(document.querySelectorAll(BLOCK_SELECTOR))
+  const candidates = Array.from(document.querySelectorAll(BLOCK_SELECTOR))
     .filter((el) => {
       if (seen.has(el)) return false;
       seen.add(el);
       return isBundleCandidateBlock(el);
-    })
+    });
+
+  return removeOverlappingCandidateBlocks(addCoverageFallbackBlock(addVisibleTextFallbackCandidates(candidates)))
     .map((el) => {
       const text = extractOriginalTextForBundle(el);
       return { element: el, text, hasFormat: hasFormatting(el) };
@@ -1888,7 +3283,7 @@ function collectBundleBlocks() {
 function isCandidateBlock(el) {
   if (!(el instanceof HTMLElement))     return false;
   if (el.closest(SKIP_SELECTOR))        return false;
-  if (el.matches(`[${PROCESSED_ATTR}]`)) return false;
+  if (isAlreadyHandledBlock(el))        return false;
   if (!isVisible(el))                   return false;
 
   const text = normalizeText(el.innerText);
@@ -1899,6 +3294,187 @@ function isCandidateBlock(el) {
   if (rect.width < 40 || rect.height < 6) return false;
 
   return true;
+}
+
+function isAlreadyHandledBlock(el) {
+  if (!(el instanceof Element)) return false;
+  if (el.matches(`[${PROCESSED_ATTR}]`)) return true;
+  return Boolean(el.parentElement?.closest?.(`[${PROCESSED_ATTR}]`));
+}
+
+function removeOverlappingCandidateBlocks(elements) {
+  const candidateSet = new Set(elements);
+  return elements.filter((el) => {
+    const descendants = elements.filter((child) => child !== el && candidateSet.has(child) && el.contains(child));
+    if (!descendants.length) return true;
+
+    const parentText = normalizeText(el.innerText);
+    if (!parentText) return false;
+
+    const descendantText = normalizeText(descendants
+      .map((child) => child.innerText)
+      .filter(Boolean)
+      .join(" "));
+
+    if (!descendantText) return true;
+    return getTextCoverage(descendantText, parentText) < 0.98;
+  });
+}
+
+function getTextCoverage(partText, fullText) {
+  const part = normalizeText(partText);
+  const full = normalizeText(fullText);
+  if (!part || !full) return 0;
+  if (full.includes(part)) return Math.min(1, part.length / full.length);
+
+  const partWords = part.toLowerCase().match(/[\p{L}\p{N}]+/gu) || [];
+  const fullWords = new Set(full.toLowerCase().match(/[\p{L}\p{N}]+/gu) || []);
+  if (!partWords.length || !fullWords.size) return 0;
+
+  const covered = partWords.filter((word) => fullWords.has(word)).length;
+  return covered / partWords.length;
+}
+
+function addVisibleTextFallbackCandidates(candidates) {
+  const result = [...candidates];
+  const seen = new Set(result);
+  const root = document.body;
+  if (!root) return result;
+
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode(node) {
+      const text = normalizeText(node.textContent || "");
+      if (!text || text.length < 2 || !shouldTranslateToSimplifiedChinese(text)) return NodeFilter.FILTER_REJECT;
+      const parent = node.parentElement;
+      if (!parent || parent.closest(SKIP_SELECTOR) || !isVisibleTextNode(node) || isAlreadyHandledBlock(parent)) {
+        return NodeFilter.FILTER_REJECT;
+      }
+      return NodeFilter.FILTER_ACCEPT;
+    }
+  });
+
+  let node = walker.nextNode();
+  while (node && result.length < MAX_BLOCKS_PER_RUN * 2) {
+    const element = getTranslationElementForTextNode(node);
+    if (element && !seen.has(element) && isTextFallbackCandidate(element)) {
+      seen.add(element);
+      result.push(element);
+    }
+    node = walker.nextNode();
+  }
+
+  return result;
+}
+
+function isTextFallbackCandidate(el) {
+  if (!(el instanceof HTMLElement)) return false;
+  if (el.closest(SKIP_SELECTOR)) return false;
+  if (isAlreadyHandledBlock(el)) return false;
+  if (!isVisible(el) && !hasVisibleTextRange(el)) return false;
+
+  const text = normalizeText(extractBlockText(el));
+  if (!text || text.length < 2) return false;
+  if (!shouldTranslateToSimplifiedChinese(text)) return false;
+  if (el.querySelector(`.${TRANSLATION_CLASS}`)) return false;
+
+  const rect = el.getBoundingClientRect();
+  return (rect.width > 0 && rect.height > 0) || hasVisibleTextRange(el);
+}
+
+function isVisibleTextNode(node) {
+  if (!node?.parentElement) return false;
+  if (isVisible(node.parentElement)) return true;
+  const range = document.createRange();
+  range.selectNodeContents(node);
+  const rect = range.getBoundingClientRect();
+  range.detach?.();
+  return rect.width > 0 && rect.height > 0;
+}
+
+function hasVisibleTextRange(el) {
+  if (!(el instanceof Element)) return false;
+  const range = document.createRange();
+  range.selectNodeContents(el);
+  const rect = range.getBoundingClientRect();
+  range.detach?.();
+  return rect.width > 0 && rect.height > 0;
+}
+
+function getTranslationElementForTextNode(textNode) {
+  const parent = textNode.parentElement;
+  if (!parent) return null;
+  const paragraphOwner = parent.closest(TEXT_FALLBACK_CONTAINER_SELECTOR);
+  if (paragraphOwner && isReadableFallbackContainer(paragraphOwner)) return paragraphOwner;
+
+  const inlineOwner = parent.closest(INLINE_TEXT_OWNER_SELECTOR);
+  if (inlineOwner && !inlineOwner.closest(SKIP_SELECTOR)) return inlineOwner;
+  return paragraphOwner || parent;
+}
+
+function isReadableFallbackContainer(el) {
+  if (!(el instanceof HTMLElement)) return false;
+  if (el.closest(SKIP_SELECTOR)) return false;
+  if (isAlreadyHandledBlock(el)) return false;
+
+  const text = normalizeText(extractBlockText(el));
+  if (!text || text.length < 2) return false;
+  if (!shouldTranslateToSimplifiedChinese(text)) return false;
+
+  if (isCompactTextContainer(el)) return true;
+  if (hasNestedParagraphBoundaries(el)) return false;
+  return text.length <= TRANSLATION_CHUNK_LENGTH;
+}
+
+function isCompactTextContainer(el) {
+  if (!(el instanceof HTMLElement)) return false;
+  if (/^(P|LI|BLOCKQUOTE|FIGCAPTION|DD|DT|TD|TH|H[1-6])$/.test(el.tagName)) return true;
+
+  const childElements = Array.from(el.children)
+    .filter((child) => !child.matches?.(SKIP_SELECTOR));
+  const blockChildren = childElements
+    .filter((child) => isParagraphBoundaryElement(child) && normalizeText(child.innerText || child.textContent).length >= 4);
+
+  return blockChildren.length === 0;
+}
+
+function addCoverageFallbackBlock(candidates) {
+  const fallback = findBestReadableContainer();
+  if (!fallback || candidates.includes(fallback)) return candidates;
+
+  const fullText = normalizeText(extractBlockText(fallback));
+  if (!fullText || fullText.length < 80 || !shouldTranslateToSimplifiedChinese(fullText)) return candidates;
+
+  const candidateText = normalizeText(candidates
+    .filter((el) => fallback.contains(el))
+    .map((el) => extractBlockText(el))
+    .filter(Boolean)
+    .join(" "));
+
+  if (getTextCoverage(candidateText, fullText) >= 0.98) return candidates;
+  return [fallback, ...candidates];
+}
+
+function findBestReadableContainer() {
+  const selectorGroups = [
+    ["article", "main article", '[role="article"]'],
+    ["main", '[role="main"]'],
+    [".article", ".post", ".entry-content", ".content", "#content"],
+    document.body ? ["body"] : []
+  ];
+
+  for (const selectors of selectorGroups) {
+    const candidates = selectors
+      .flatMap((selector) => Array.from(document.querySelectorAll(selector)))
+      .filter((el, index, list) => list.indexOf(el) === index)
+      .filter((el) => el instanceof HTMLElement && !el.closest(SKIP_SELECTOR) && isVisible(el))
+      .map((el) => ({ el, text: normalizeText(extractBlockText(el)) }))
+      .filter((item) => item.text.length >= 80 && shouldTranslateToSimplifiedChinese(item.text))
+      .sort((a, b) => b.text.length - a.text.length);
+
+    if (candidates.length) return candidates[0].el;
+  }
+
+  return null;
 }
 
 function isBundleCandidateBlock(el) {
@@ -1922,7 +3498,106 @@ function extractOriginalTextForBundle(el) {
 
   const clone = el.cloneNode(true);
   clone.querySelectorAll(`.${TRANSLATION_CLASS}, .${REPLACED_CLASS}`).forEach((node) => node.remove());
-  return hasFormatting(el) ? htmlToMarkdown(clone.innerHTML) : normalizeTextPreserveBreaks(clone.innerText || clone.textContent);
+  return extractBlockText(clone);
+}
+
+function extractBlockText(el) {
+  if (!el) return "";
+  if (hasFormatting(el) || hasNestedParagraphBoundaries(el)) {
+    return domToMarkdownPreserveParagraphs(el);
+  }
+  return normalizeTextPreserveBreaks(el.innerText || el.textContent);
+}
+
+function hasNestedParagraphBoundaries(el) {
+  const nestedBlocks = Array.from(el.querySelectorAll("*"))
+    .filter((child) => {
+      const isDetached = !document.documentElement.contains(child);
+      return child !== el
+        && (isDetached || isVisible(child))
+        && isParagraphBoundaryElement(child)
+        && normalizeText(child.innerText || child.textContent).length >= 4;
+    });
+  if (nestedBlocks.length >= 2) return true;
+
+  const text = String(el.innerText || el.textContent || "");
+  return /\S[^\n]*\n\s*\n[^\n]*\S/.test(text);
+}
+
+function domToMarkdownPreserveParagraphs(root) {
+  return normalizeTextPreserveBreaks(Array.from(root.childNodes).map(nodeToMarkdown).join(""));
+}
+
+function nodeToMarkdown(node) {
+  if (node.nodeType === Node.TEXT_NODE) return node.textContent || "";
+  if (!(node instanceof Element)) return "";
+  if (node.classList?.contains(TRANSLATION_CLASS) || node.classList?.contains(REPLACED_CLASS)) return "";
+  if (node.matches(SKIP_SELECTOR)) return "";
+
+  if (node.tagName === "BR") return "\n";
+
+  let text = Array.from(node.childNodes).map(nodeToMarkdown).join("");
+  const tag = node.tagName;
+
+  if (tag === "STRONG" || tag === "B") text = wrapInlineMarkdown(text, "**");
+  if (tag === "EM" || tag === "I") text = wrapInlineMarkdown(text, "*");
+  if (tag === "U") text = wrapInlineMarkdown(text, "_");
+  if (tag === "CODE") text = wrapInlineMarkdown(text.replace(/`/g, "'"), "`");
+  if (tag === "A") {
+    const href = node.getAttribute("href") || "";
+    if (href && text.trim()) text = `[${text.trim()}](${href})`;
+  }
+
+  if (isParagraphBoundaryElement(node)) {
+    return `\n\n${text.trim()}\n\n`;
+  }
+
+  return text;
+}
+
+function wrapInlineMarkdown(text, marker) {
+  const value = String(text || "").trim();
+  return value ? `${marker}${value}${marker}` : "";
+}
+
+function isParagraphBoundaryElement(el) {
+  if (!(el instanceof Element)) return false;
+  if (el.classList?.contains(PDF_BLOCK_CLASS)) return true;
+  if (PARAGRAPH_BOUNDARY_TAGS.has(el.tagName)) return true;
+
+  const role = String(el.getAttribute("role") || "").toLowerCase();
+  if (/^(article|document|heading|list|listitem|main|paragraph|row|table)$/.test(role)) return true;
+
+  const style = getElementDisplayStyle(el);
+  if (/^(block|flow-root|list-item|table|table-row|table-cell|flex|grid)$/.test(style.display)) return true;
+  if (/^(flex|grid)$/.test(style.parentDisplay || "")) return true;
+  if (style.display === "inline-block" && isWideTextInlineBlock(el)) return true;
+
+  return false;
+}
+
+function getElementDisplayStyle(el) {
+  if (!(el instanceof HTMLElement) || !document.documentElement.contains(el)) {
+    const inlineDisplay = String(el.getAttribute?.("style") || "").match(/display\s*:\s*([^;]+)/i)?.[1]?.trim().toLowerCase() || "";
+    return { display: inlineDisplay, parentDisplay: "" };
+  }
+
+  const computed = window.getComputedStyle(el);
+  const parentComputed = el.parentElement ? window.getComputedStyle(el.parentElement) : null;
+  return {
+    display: computed.display,
+    parentDisplay: parentComputed?.display || ""
+  };
+}
+
+function isWideTextInlineBlock(el) {
+  if (!(el instanceof HTMLElement) || !document.documentElement.contains(el)) return false;
+  const text = normalizeText(el.innerText || el.textContent);
+  if (text.length < 20) return false;
+  const rect = el.getBoundingClientRect();
+  const parentRect = el.parentElement?.getBoundingClientRect();
+  if (!parentRect?.width) return false;
+  return rect.width >= Math.min(parentRect.width * 0.55, 360);
 }
 
 function isInViewport(el) {
@@ -1984,16 +3659,19 @@ function normalizeTextPreserveBreaks(text) {
 }
 function shouldTranslateToSimplifiedChinese(text) {
   const value = normalizeText(text);
-  if (value.length < 4) return false;
+  if (value.length < 2) return false;
+  if (isProtectedInlineTokenOnly(value)) return false;
   if (isMostlyNonContent(value)) return false;
   if (hasTraditionalChineseSignal(value)) return true;
+  if (isChineseDominantMixedText(value)) return false;
+  if (hasChineseWithInlineTerm(value)) return false;
   return !isLikelySimplifiedChinese(value);
 }
 
 function isLikelySimplifiedChinese(text) {
   const readableText = stripSocialNoise(text);
   const cjk = readableText.match(/[\u3400-\u9fff]/g)?.length || 0;
-  if (cjk < 4) return false;
+  if (cjk < 2) return false;
   const latin = readableText.match(/[A-Za-z]/g)?.length || 0;
   const kana = readableText.match(/[\u3040-\u30ff]/g)?.length || 0;
   const hangul = readableText.match(/[\uac00-\ud7af]/g)?.length || 0;
@@ -2025,9 +3703,59 @@ function stripSocialNoise(text) {
 
 function isMostlyNonContent(text) {
   const languageChars = text.match(/[A-Za-z\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]/g)?.length || 0;
-  if (languageChars < 3) return true;
-  if (/^(https?:\/\/|www\.|@[\w.-]+$|#[\w.-]+$)/i.test(text)) return true;
+  if (languageChars < 2) return true;
+  if (/^(https?:\/\/|www\.|@[\w.-]+$|#[\w.-]+$|\$[A-Za-z][A-Za-z0-9._-]*$)/i.test(text)) return true;
   return languageChars / text.length < 0.28;
+}
+
+function isProtectedInlineTokenOnly(text) {
+  const value = String(text || "").trim();
+  if (!value) return false;
+  PROTECTED_INLINE_TOKEN_PATTERN.lastIndex = 0;
+  COMMON_UNTRANSLATED_TERM_PATTERN.lastIndex = 0;
+  const stripped = value
+    .replace(PROTECTED_INLINE_TOKEN_PATTERN, " ")
+    .replace(COMMON_UNTRANSLATED_TERM_PATTERN, " ")
+    .replace(/\s+/g, "")
+    .trim();
+  PROTECTED_INLINE_TOKEN_PATTERN.lastIndex = 0;
+  COMMON_UNTRANSLATED_TERM_PATTERN.lastIndex = 0;
+  return stripped === "";
+}
+
+function isChineseDominantMixedText(text) {
+  const readableText = stripSocialNoise(text);
+  if (hasTraditionalChineseSignal(readableText)) return false;
+  const cjk = readableText.match(/[\u3400-\u9fff]/g)?.length || 0;
+  const latinWords = getLatinWordsForTranslationDecision(readableText);
+  if (cjk < 2 || !latinWords.length) return false;
+  const kana = readableText.match(/[\u3040-\u30ff]/g)?.length || 0;
+  const hangul = readableText.match(/[\uac00-\ud7af]/g)?.length || 0;
+  if (kana || hangul) return false;
+  return cjk > latinWords.length;
+}
+
+function hasChineseWithInlineTerm(text) {
+  const value = String(text || "");
+  if (!/[\u3400-\u9fff]/.test(value)) return false;
+  if (hasTraditionalChineseSignal(value)) return false;
+
+  COMMON_UNTRANSLATED_TERM_PATTERN.lastIndex = 0;
+  const hasCommonTerm = COMMON_UNTRANSLATED_TERM_PATTERN.test(value);
+  COMMON_UNTRANSLATED_TERM_PATTERN.lastIndex = 0;
+
+  return hasCommonTerm
+    || /[\u3400-\u9fff][A-Za-z][A-Za-z0-9+./-]*|[A-Za-z][A-Za-z0-9+./-]*[\u3400-\u9fff]/.test(value)
+    || /[\u3400-\u9fff][（(]\s*[A-Za-z][A-Za-z0-9+./\s-]{1,60}\s*[)）]/.test(value);
+}
+
+function getLatinWordsForTranslationDecision(text) {
+  const cleaned = String(text || "")
+    .replace(PROTECTED_INLINE_TOKEN_PATTERN, " ")
+    .replace(COMMON_UNTRANSLATED_TERM_PATTERN, " ");
+  PROTECTED_INLINE_TOKEN_PATTERN.lastIndex = 0;
+  COMMON_UNTRANSLATED_TERM_PATTERN.lastIndex = 0;
+  return cleaned.match(/[A-Za-z]+(?:[-'][A-Za-z]+)?/g) || [];
 }
 function isVisible(el) {
   const s = window.getComputedStyle(el);
@@ -2037,6 +3765,41 @@ function isVisible(el) {
 
 function splitTextForTranslation(text) {
   const source = normalizeTextPreserveBreaks(text);
+  return splitTextPreservingLineBreaks(source).flatMap((segment) => {
+    const chunks = splitTextSegmentForTranslation(segment.text);
+    if (!chunks.length) return segment.separator ? [{ text: "", separator: segment.separator }] : [];
+    return chunks.map((chunk, index) => ({
+      text: chunk,
+      separator: index === chunks.length - 1 ? segment.separator : ""
+    }));
+  });
+}
+
+function splitTextPreservingLineBreaks(source) {
+  const segments = [];
+  const tokens = String(source || "").split(/(\n+)/);
+  let current = "";
+
+  for (const token of tokens) {
+    if (!token) continue;
+    if (/^\n+$/.test(token)) {
+      if (current.trim()) {
+        segments.push({ text: current.trim(), separator: token });
+        current = "";
+      } else if (segments.length) {
+        segments[segments.length - 1].separator += token;
+      }
+      continue;
+    }
+    current += token;
+  }
+
+  if (current.trim()) segments.push({ text: current.trim(), separator: "" });
+  return segments;
+}
+
+function splitTextSegmentForTranslation(source) {
+  if (!source) return [];
   if (source.length <= TRANSLATION_CHUNK_LENGTH) return [source];
 
   const parts = [];
@@ -2074,11 +3837,31 @@ function splitLongText(text, maxLength) {
 }
 
 function stripStreamedText(content) {
-  return String(content || "")
-    .replace(/<think>[\s\S]*?<\/think>/gi, "")
+  let cleaned = String(content || "")
+    .replace(/<think\b[^>]*>[\s\S]*?(?:<\/think>|$)/gi, "")
+    .replace(/<thinking\b[^>]*>[\s\S]*?(?:<\/thinking>|$)/gi, "")
+    .replace(/^\s*(?:\/?no[_\s-]*think|<no[_\s-]*think\s*\/?>)\s*$/gim, "")
     .replace(/```(?:json)?/gi, "")
     .replace(/```/g, "")
     .trim();
+
+  cleaned = stripLeadingReasoningBlock(cleaned);
+  return cleaned.trim();
+}
+
+function stripLeadingReasoningBlock(text) {
+  const value = String(text || "").trim();
+  if (!value) return "";
+
+  const finalMatch = value.match(/(?:^|\n)\s*(?:翻译|译文|结果|答案|translation|translated text|answer|final)\s*[:：]\s*/i);
+  if (finalMatch && finalMatch.index !== undefined) {
+    const before = value.slice(0, finalMatch.index);
+    if (/^\s*(?:思考|推理|分析|reasoning|thought|thinking)\s*[:：]/i.test(before.trim())) {
+      return value.slice(finalMatch.index + finalMatch[0].length);
+    }
+  }
+
+  return value.replace(/^\s*(?:思考|推理|分析|reasoning|thought|thinking)\s*[:：]\s*(?:无|none|no[_\s-]*think|no thinking)?\s*[\r\n]+/i, "");
 }
 
 function humanizeStreamError(error, settings) {

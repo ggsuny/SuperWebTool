@@ -3,7 +3,7 @@
   "name": "Page Inline Translator",
   "description": "Translate English webpages in-place with replace or bilingual inline mode.",
   "version": "0.1.0",
-  "permissions": ["activeTab", "downloads", "scripting", "storage", "tabs"],
+  "permissions": ["activeTab", "contextMenus", "downloads", "scripting", "storage", "tabs"],
   "host_permissions": ["<all_urls>", "http://localhost/*", "http://127.0.0.1/*"],
   "action": {
     "default_title": "Translate this page",
@@ -18,19 +18,24 @@
     "service_worker": "src/background.js",
     "type": "module"
   },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "pdf-extractor.html",
+        "src/pdf-extractor.js",
+        "vendor/pdf.min.js",
+        "vendor/pdf.worker.min.js"
+      ],
+      "matches": ["<all_urls>"]
+    }
+  ],
   "commands": {
-    "_execute_action": {
+    "save_page": {
       "suggested_key": {
-        "default": "Alt+Shift+R",
-        "mac": "Alt+Shift+R"
-      }
-    },
-    "open_reader_panel": {
-      "suggested_key": {
-        "default": "Alt+Shift+O",
-        "mac": "Alt+Shift+O"
+        "default": "Alt+Shift+S",
+        "mac": "Alt+Shift+S"
       },
-      "description": "打开页面阅读助手"
+      "description": "保存当前页面笔记"
     },
     "translate_current_page": {
       "suggested_key": {
@@ -39,12 +44,12 @@
       },
       "description": "打开页面阅读助手并开始翻译"
     },
-    "send_selection_to_note": {
+    "mark_selection": {
       "suggested_key": {
-        "default": "Alt+Shift+N",
-        "mac": "Alt+Shift+N"
+        "default": "Alt+X",
+        "mac": "Alt+X"
       },
-      "description": "把当前选中文本发送到笔记"
+      "description": "标记当前选中文本并发送到笔记"
     }
   },
   "content_scripts": [

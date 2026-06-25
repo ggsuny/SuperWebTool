@@ -12,6 +12,41 @@
   }
 }
 
+@keyframes pitCurtainGlow {
+  0%, 100% {
+    box-shadow:
+      0 0 0 1px color-mix(in srgb, #f8d77a 26%, transparent),
+      0 0 10px color-mix(in srgb, #f8d77a 22%, transparent);
+  }
+  50% {
+    box-shadow:
+      0 0 0 1px color-mix(in srgb, #f8d77a 42%, transparent),
+      0 0 18px color-mix(in srgb, #f8d77a 34%, transparent);
+  }
+}
+
+@keyframes pitCurtainReveal {
+  from {
+    clip-path: inset(0 0 100% 0);
+    filter: saturate(1.08) brightness(1.06);
+  }
+  to {
+    clip-path: inset(0 0 0 0);
+    filter: saturate(1) brightness(1);
+  }
+}
+
+@keyframes pitNoteUnfold {
+  from {
+    clip-path: inset(0 100% 100% 0 round 7px);
+    opacity: 0.98;
+  }
+  to {
+    clip-path: inset(0 0 0 0 round 7px);
+    opacity: 1;
+  }
+}
+
 .pit-translation {
   animation: pitFadeIn 0.35s cubic-bezier(0.16, 1, 0.3, 1) forwards;
   transition: opacity 0.3s ease, background-color 0.3s ease, border-color 0.3s ease;
@@ -23,19 +58,30 @@
 /* ── 翻译块：加载中状态 ── */
 .pit-translation[data-state="loading"] {
   opacity: 0.45 !important;
-  font-style: italic;
 }
 
 .pit-translation[data-state="waiting"] {
   opacity: 0.6 !important;
-  font-style: italic;
 }
 
 /* ══════════════════════════════════════
    样式 1（默认）：左侧实线竖线
    ══════════════════════════════════════ */
-.pit-translation[data-pit-style="bar"],
-.pit-translation:not([data-pit-style]) {
+.pit-translation:not(.pit-replaced)[data-pit-style="none"] {
+  display: block;
+  box-sizing: border-box;
+  margin-top: 0.25em;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  line-height: var(--pit-translation-line-height, 1.4) !important;
+  opacity: 1;
+}
+
+.pit-translation:not(.pit-replaced)[data-pit-style="bar"],
+.pit-translation:not(.pit-replaced):not([data-pit-style]) {
   display: block;
   box-sizing: border-box;
   margin-top: 0.45em;
@@ -50,7 +96,7 @@
 /* ══════════════════════════════════════
    样式 2：虚线方框
    ══════════════════════════════════════ */
-.pit-translation[data-pit-style="dashed-box"] {
+.pit-translation:not(.pit-replaced)[data-pit-style="dashed-box"] {
   display: block;
   box-sizing: border-box;
   margin-top: 0.5em;
@@ -66,7 +112,7 @@
 /* ══════════════════════════════════════
    样式 3：浅色高亮背景（类纸质感）
    ══════════════════════════════════════ */
-.pit-translation[data-pit-style="highlight"] {
+.pit-translation:not(.pit-replaced)[data-pit-style="highlight"] {
   display: block;
   box-sizing: border-box;
   margin-top: 0.4em;
@@ -82,7 +128,7 @@
 /* ══════════════════════════════════════
    样式 4：上方细分隔线（简洁款）
    ══════════════════════════════════════ */
-.pit-translation[data-pit-style="top-line"] {
+.pit-translation:not(.pit-replaced)[data-pit-style="top-line"] {
   display: block;
   box-sizing: border-box;
   margin-top: 0.5em;
@@ -90,7 +136,6 @@
   border-top: 1px solid color-mix(in srgb, currentColor 25%, transparent);
   color: inherit;
   font: inherit;
-  font-size: 0.95em;
   line-height: var(--pit-translation-line-height, 1.4) !important;
   opacity: 0.82;
 }
@@ -98,7 +143,7 @@
 /* ══════════════════════════════════════
    样式 5：圆角气泡（贴纸感）
    ══════════════════════════════════════ */
-.pit-translation[data-pit-style="bubble"] {
+.pit-translation:not(.pit-replaced)[data-pit-style="bubble"] {
   display: inline-block;
   box-sizing: border-box;
   margin-top: 0.45em;
@@ -108,7 +153,6 @@
   background: color-mix(in srgb, currentColor 6%, transparent);
   color: inherit;
   font: inherit;
-  font-size: 0.93em;
   line-height: var(--pit-translation-line-height, 1.4) !important;
   opacity: 0.88;
 }
@@ -122,6 +166,77 @@
   white-space: pre-wrap;
 }
 
+.pit-curtain-stage {
+  position: relative;
+  display: block;
+  box-sizing: border-box;
+  min-height: var(--pit-curtain-min-height, 1em);
+  border-radius: 4px;
+}
+
+.pit-curtain-stage:has(> .pit-replaced:not([data-state="done"])) {
+  animation: pitCurtainGlow 1.8s ease-in-out infinite;
+}
+
+.pit-curtain-original {
+  display: block;
+}
+
+.pit-curtain-stage > .pit-replaced {
+  position: absolute;
+  inset: 0;
+  display: block;
+  box-sizing: border-box;
+  opacity: 0 !important;
+  pointer-events: none;
+}
+
+.pit-curtain-stage > .pit-replaced[data-state="done"],
+.pit-curtain-stage > .pit-replaced[data-state="error"] {
+  position: relative;
+  inset: auto;
+  opacity: 1 !important;
+  pointer-events: auto;
+  animation: pitCurtainReveal 0.62s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.pit-curtain-stage:has(> .pit-replaced[data-state="done"]) > .pit-curtain-original,
+.pit-curtain-stage:has(> .pit-replaced[data-state="error"]) > .pit-curtain-original {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* ── 页面内 PDF 抽取内容 ── */
+.pit-pdf-content {
+  box-sizing: border-box;
+  margin: 18px 0;
+  padding: 14px 16px;
+  border: 1px solid color-mix(in srgb, currentColor 16%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, currentColor 4%, transparent);
+  color: inherit;
+  font: inherit;
+  line-height: 1.55;
+}
+
+.pit-pdf-content > h2 {
+  margin: 0 0 10px;
+  font: inherit;
+  font-size: 1.05em;
+  font-weight: 700;
+}
+
+.pit-pdf-block {
+  margin: 0 0 0.85em;
+  white-space: pre-wrap;
+}
+
+.pit-pdf-block:last-child {
+  margin-bottom: 0;
+}
+
 /* ── 页面内 Ask 面板 ── */
 .pit-ask-panel {
   position: fixed;
@@ -129,7 +244,7 @@
   top: 72px;
   right: 16px;
   display: grid;
-  grid-template-rows: auto auto 1fr auto;
+  grid-template-rows: auto auto 1fr auto auto;
   width: min(390px, calc(100vw - 24px));
   height: min(620px, calc(100vh - 96px));
   min-width: 320px;
@@ -138,7 +253,8 @@
   max-height: calc(100vh - 24px);
   border: 1px solid rgba(35, 38, 47, 0.14);
   border-radius: 10px;
-  background: rgba(255, 255, 255, 0.97);
+  color-scheme: light;
+  background: rgba(255, 255, 255, 0.9);
   color: #1f2933;
   box-shadow: 0 16px 48px rgba(15, 23, 42, 0.2);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -157,6 +273,10 @@
 
 .pit-ask-panel[hidden] {
   display: none !important;
+}
+
+.pit-ask-panel.is-receiving-mark {
+  animation: pitPanelReceiveMark 1.05s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 .pit-reader-header {
@@ -277,7 +397,10 @@
 
 .pit-reader-status {
   display: block;
-  margin-top: 2px;
+  min-height: 18px;
+  padding: 7px 12px 8px;
+  border-top: 1px solid rgba(35, 38, 47, 0.1);
+  background: #f8fafc;
   color: #667085;
   font-size: 12px;
   line-height: 1.25;
@@ -377,6 +500,12 @@
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace !important;
   font-size: 13px !important;
   line-height: 1.45 !important;
+  scroll-behavior: smooth;
+  transition: border-color 0.22s ease, box-shadow 0.22s ease, background-color 0.22s ease;
+}
+
+.pit-panel-note.is-receiving-mark {
+  animation: pitNoteReceiveMark 1.45s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 .pit-note-render {
@@ -406,6 +535,16 @@
 .pit-reader-range-field strong {
   color: #1f6feb;
   font-size: 12px;
+}
+
+.pit-reader-color-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.pit-reader-color-grid .pit-reader-field {
+  min-width: 0;
 }
 
 .pit-reader-field input[type="range"] {
@@ -641,7 +780,7 @@
 }
 
 .pit-selection-toolbar {
-  position: absolute;
+  position: fixed;
   z-index: 2147483647;
   display: inline-flex;
   align-items: center;
@@ -659,15 +798,41 @@
 }
 
 .pit-manual-mark {
+  position: relative;
   text-decoration: underline;
   text-decoration-color: var(--pit-mark-highlight-color, #f5c542);
-  text-decoration-thickness: 1.5px;
+  text-decoration-thickness: 0.75px;
   text-underline-offset: 0.16em;
+}
+
+.pit-manual-mark.is-confirmed {
+  animation: pitMarkedTextConfirm 1.05s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.pit-manual-mark.is-confirmed::after {
+  content: "✓";
+  position: absolute;
+  z-index: 1;
+  right: -0.45em;
+  top: -0.9em;
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  background: #16a34a;
+  color: #fff;
+  box-shadow: 0 4px 12px rgba(22, 163, 74, 0.32);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 11px;
+  font-weight: 850;
+  line-height: 1;
+  pointer-events: none;
+  animation: pitMarkCheckPop 0.95s cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
 
 .pit-manual-mark[data-pit-mark-style="highlight"] {
   background: var(--pit-mark-highlight-color, #fff2a8);
-  box-shadow: inset 0 -0.22em 0 rgba(255, 210, 64, 0.72);
 }
 
 .pit-manual-mark[data-pit-mark-style="bold"] {
@@ -688,6 +853,367 @@
   border-radius: 4px;
   background: rgba(15, 23, 42, 0.08);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+}
+
+.pit-manual-mark.is-url-inactive {
+  padding: 0 !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  font-family: inherit !important;
+  font-style: inherit !important;
+  font-weight: inherit !important;
+  text-decoration: none !important;
+  animation: none !important;
+}
+
+.pit-manual-mark.is-url-inactive::after {
+  display: none !important;
+}
+
+.pit-mark-note-composer {
+  position: absolute;
+  z-index: 2147483646;
+  display: block;
+  width: min(310px, 100%);
+  max-width: calc(100vw - 32px);
+  box-sizing: border-box;
+  margin: 0;
+  padding: 5px 6px;
+  border: 1px solid rgba(31, 111, 235, 0.18);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.96);
+  color: #1f2933;
+  box-shadow: 0 8px 22px rgba(15, 23, 42, 0.12);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 12px;
+  line-height: 1.3;
+  vertical-align: top;
+  transform-origin: left top;
+  transition:
+    min-height 0.22s ease,
+    border-color 0.22s ease,
+    background-color 0.22s ease,
+    box-shadow 0.22s ease,
+    transform 0.22s ease;
+}
+
+.pit-mark-note-composer.is-hover-note {
+  position: fixed;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border-color: rgba(17, 24, 39, 0.12);
+  border-radius: 999px;
+  background: rgba(156, 163, 175, 0.62);
+  box-shadow: 0 2px 7px rgba(15, 23, 42, 0.1);
+  opacity: 0;
+  transform: scale(0.88);
+  transition:
+    opacity 0.22s ease,
+    transform 0.22s ease,
+    width 0.18s ease,
+    height 0.18s ease,
+    background-color 0.18s ease,
+    border-color 0.18s ease,
+    box-shadow 0.18s ease;
+}
+
+.pit-mark-note-composer.is-hover-note.is-visible {
+  opacity: 1;
+  transform: scale(1);
+}
+
+.pit-mark-note-composer.is-hover-note.is-hiding {
+  opacity: 0;
+  transform: scale(0.88);
+  pointer-events: none;
+}
+
+.pit-mark-note-composer.is-hover-note:hover,
+.pit-mark-note-composer.is-hover-note:focus-within {
+  opacity: 1;
+}
+
+.pit-mark-note-composer.is-hover-note.has-note {
+  width: 24px;
+  height: 24px;
+  border-color: rgba(22, 163, 74, 0.54);
+  background: #16a34a;
+  box-shadow: 0 5px 12px rgba(22, 163, 74, 0.24);
+  opacity: 1;
+}
+
+.pit-mark-note-composer.is-hover-note:not(.is-target-hovered) {
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+}
+
+.pit-mark-note-composer.is-hover-note:not(.is-target-hovered) .pit-mark-note-label {
+  opacity: 0 !important;
+  visibility: hidden !important;
+  pointer-events: none !important;
+}
+
+.pit-mark-note-composer.is-hover-note::after {
+  content: "";
+  position: absolute;
+  z-index: 0;
+  top: -10px;
+  right: 100%;
+  width: 14px;
+  height: 44px;
+}
+
+.pit-mark-note-composer.is-hover-note::before {
+  content: "";
+  position: absolute;
+  z-index: 0;
+  top: -10px;
+  left: 100%;
+  width: 14px;
+  height: 44px;
+}
+
+.pit-mark-note-composer[hidden] {
+  display: none !important;
+}
+
+.pit-mark-note-label {
+  display: none;
+}
+
+.pit-mark-note-field {
+  position: relative;
+  display: block;
+  width: 100%;
+  min-width: 0;
+}
+
+.pit-mark-note-input {
+  width: 100%;
+  height: 30px;
+  min-height: 30px;
+  box-sizing: border-box;
+  padding: 6px 72px 6px 9px;
+  border: 0;
+  border-radius: 0;
+  outline: none;
+  background: transparent;
+  color: #1f2933;
+  font: inherit;
+  line-height: 18px;
+  overflow: hidden;
+  resize: none;
+  white-space: pre-wrap;
+}
+
+.pit-mark-note-input:focus {
+  box-shadow: none;
+}
+
+.pit-mark-note-shortcut {
+  position: absolute;
+  right: 8px;
+  bottom: 7px;
+  color: #98a2b3;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1;
+  pointer-events: none;
+  user-select: none;
+}
+
+.pit-mark-note-composer.is-empty .pit-mark-note-input {
+  background: rgba(254, 226, 226, 0.72);
+}
+
+.pit-mark-note-composer.is-sent {
+  border-color: rgba(22, 163, 74, 0.36);
+  background: rgba(240, 253, 244, 0.98);
+  transition: opacity 0.28s ease, transform 0.28s ease;
+}
+
+.pit-mark-note-composer.is-hover-note {
+  cursor: pointer;
+}
+
+.pit-mark-note-composer.is-hover-note .pit-mark-note-label {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  color: transparent;
+  padding: 0;
+  border: 0;
+  border-radius: inherit;
+  background: transparent;
+  cursor: pointer;
+}
+
+.pit-mark-note-composer.is-hover-note .pit-mark-note-label::before {
+  content: "+";
+  display: block;
+  color: rgba(17, 24, 39, 0.78);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 14px;
+  transform: translateY(-0.5px);
+}
+
+.pit-mark-note-composer.is-hover-note.has-note .pit-mark-note-label::before {
+  color: #fff;
+  font-size: 17px;
+  line-height: 17px;
+}
+
+.pit-mark-note-composer.is-hover-note .pit-mark-note-field {
+  position: absolute;
+  z-index: 1;
+  top: 50%;
+  left: calc(100% + 8px);
+  display: block;
+  width: min(310px, calc(100vw - 32px));
+  max-height: min(340px, 48vh);
+  box-sizing: border-box;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.98);
+  box-shadow: 0 12px 28px rgba(15, 23, 42, 0.16);
+  opacity: 0;
+  overflow: hidden;
+  pointer-events: none;
+  visibility: hidden;
+  transform: translateY(-50%) translateX(-4px) scale(0.98);
+  transform-origin: left center;
+  transition:
+    opacity 0.18s ease,
+    transform 0.18s ease,
+    visibility 0s linear 0.18s;
+}
+
+.pit-mark-note-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 26px;
+  padding: 4px 5px 0 9px;
+  border-bottom: 1px solid rgba(15, 23, 42, 0.06);
+  color: #667085;
+  user-select: none;
+}
+
+.pit-mark-note-drag-handle {
+  flex: 1;
+  padding: 3px 0;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: grab;
+  touch-action: none;
+}
+
+.pit-mark-note-composer.is-dragging .pit-mark-note-drag-handle {
+  cursor: grabbing;
+}
+
+.pit-mark-note-close {
+  min-width: 0;
+  min-height: 0;
+  padding: 3px 5px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: #667085;
+  font: inherit;
+  font-size: 10px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.pit-mark-note-close:hover,
+.pit-mark-note-close:focus-visible {
+  background: rgba(15, 23, 42, 0.07);
+  color: #182230;
+  outline: none;
+}
+
+.pit-mark-note-composer.is-hover-note.opens-below .pit-mark-note-field {
+  top: calc(100% + 8px);
+  right: 0;
+  left: auto;
+  transform: translateY(-4px) scale(0.98);
+  transform-origin: right top;
+}
+
+.pit-mark-note-composer.is-hover-note.is-dragged .pit-mark-note-field {
+  position: fixed;
+  top: var(--pit-note-drag-top);
+  right: auto;
+  left: var(--pit-note-drag-left);
+  transform: none;
+  transform-origin: center;
+}
+
+.pit-mark-note-composer.is-hover-note:hover,
+.pit-mark-note-composer.is-hover-note:focus-within {
+  box-shadow: 0 3px 9px rgba(15, 23, 42, 0.16);
+}
+
+.pit-mark-note-composer.is-hover-note.has-note:hover,
+.pit-mark-note-composer.is-hover-note.has-note:focus-within {
+  box-shadow: 0 5px 12px rgba(22, 163, 74, 0.24);
+}
+
+.pit-mark-note-composer.is-hover-note:hover .pit-mark-note-field,
+.pit-mark-note-composer.is-hover-note:focus-within .pit-mark-note-field,
+.pit-mark-note-composer.is-hover-note.is-dragging .pit-mark-note-field,
+.pit-mark-note-composer.is-hover-note.has-content:not(.is-closed) .pit-mark-note-field,
+.pit-mark-note-composer.is-hover-note.has-note:not(.is-closed) .pit-mark-note-field {
+  opacity: 1;
+  pointer-events: auto;
+  visibility: visible;
+  transform: translateY(-50%) translateX(0) scale(1);
+  transition:
+    opacity 0.18s ease,
+    transform 0.18s ease,
+    visibility 0s;
+}
+
+.pit-mark-note-composer.is-hover-note.opens-below:hover .pit-mark-note-field,
+.pit-mark-note-composer.is-hover-note.opens-below:focus-within .pit-mark-note-field,
+.pit-mark-note-composer.is-hover-note.opens-below.has-content:not(.is-closed) .pit-mark-note-field,
+.pit-mark-note-composer.is-hover-note.opens-below.has-note:not(.is-closed) .pit-mark-note-field {
+  transform: translateY(0) scale(1);
+}
+
+.pit-mark-note-composer.is-hover-note.is-dragged:hover .pit-mark-note-field,
+.pit-mark-note-composer.is-hover-note.is-dragged:focus-within .pit-mark-note-field,
+.pit-mark-note-composer.is-hover-note.is-dragged.is-dragging .pit-mark-note-field,
+.pit-mark-note-composer.is-hover-note.is-dragged.has-content:not(.is-closed) .pit-mark-note-field,
+.pit-mark-note-composer.is-hover-note.is-dragged.has-note:not(.is-closed) .pit-mark-note-field {
+  transform: none;
+}
+
+.pit-mark-note-composer.is-hover-note.is-closed .pit-mark-note-field {
+  opacity: 0;
+  pointer-events: none;
+  visibility: hidden;
+}
+
+.pit-mark-note-composer.is-hover-note.is-writing .pit-mark-note-field {
+  width: min(310px, calc(100vw - 32px));
+}
+
+.pit-mark-note-composer.is-hover-note:hover .pit-mark-note-label,
+.pit-mark-note-composer.is-hover-note:focus-within .pit-mark-note-label {
+  opacity: 1;
+  pointer-events: auto;
 }
 
 .pit-selection-toolbar[hidden] {
@@ -712,6 +1238,40 @@
 
 .pit-selection-action:hover {
   background: rgba(255, 255, 255, 0.08);
+}
+
+.pit-selection-action[data-feedback="success"] {
+  color: #fff;
+  background: #16a34a;
+  animation: pitMarkButtonSuccess 0.48s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.pit-selection-action[data-feedback="success"] svg {
+  opacity: 0;
+}
+
+.pit-selection-action[data-feedback="success"]::after {
+  content: "✓";
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  width: auto;
+  max-width: none;
+  padding: 0;
+  border-radius: inherit;
+  background: transparent;
+  color: inherit;
+  box-shadow: none;
+  font-size: 15px;
+  font-weight: 900;
+  line-height: 1;
+  transform: none;
+  pointer-events: none;
+}
+
+.pit-selection-action[data-feedback="success"]::before {
+  content: none;
 }
 
 .pit-selection-action:hover::after {
@@ -745,6 +1305,30 @@
   pointer-events: none;
 }
 
+.pit-selection-action[data-feedback="success"]:hover::after {
+  content: "✓";
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  width: auto;
+  max-width: none;
+  padding: 0;
+  border-radius: inherit;
+  background: transparent;
+  color: inherit;
+  box-shadow: none;
+  font-size: 15px;
+  font-weight: 900;
+  line-height: 1;
+  transform: none;
+  pointer-events: none;
+}
+
+.pit-selection-action[data-feedback="success"]:hover::before {
+  content: none;
+}
+
 .pit-selection-action svg {
   width: 17px;
   height: 17px;
@@ -758,4 +1342,136 @@
 .pit-selection-accent {
   stroke: #f2c94c;
   stroke-width: 2.6;
+}
+
+.pit-mark-flyout {
+  position: fixed;
+  z-index: 2147483647;
+  left: 0;
+  top: 0;
+  max-width: min(260px, calc(100vw - 32px));
+  box-sizing: border-box;
+  padding: 6px 10px;
+  border: 1px solid rgba(31, 111, 235, 0.22);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.96);
+  color: #1f2933;
+  box-shadow: 0 12px 30px rgba(15, 23, 42, 0.18);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.35;
+  opacity: 0;
+  overflow: hidden;
+  pointer-events: none;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transform: translate3d(-50%, -50%, 0) scale(0.96);
+}
+
+.pit-mark-flyout.is-flying {
+  animation: pitMarkFlyToPanel 0.68s cubic-bezier(0.2, 0.84, 0.22, 1) forwards;
+}
+
+@keyframes pitPanelReceiveMark {
+  0% {
+    border-color: rgba(31, 111, 235, 0.16);
+    box-shadow: 0 16px 48px rgba(15, 23, 42, 0.2);
+  }
+  28% {
+    border-color: rgba(31, 111, 235, 0.8);
+    box-shadow: 0 16px 48px rgba(15, 23, 42, 0.2), 0 0 0 4px rgba(31, 111, 235, 0.14), 0 0 28px rgba(31, 111, 235, 0.28);
+  }
+  100% {
+    border-color: rgba(35, 38, 47, 0.14);
+    box-shadow: 0 16px 48px rgba(15, 23, 42, 0.2);
+  }
+}
+
+@keyframes pitNoteReceiveMark {
+  0%, 100% {
+    border-color: #c9d2df;
+    background-color: #fff;
+    box-shadow: none;
+  }
+  18%, 62% {
+    border-color: rgba(31, 111, 235, 0.72);
+    background-color: #f8fbff;
+    box-shadow: 0 0 0 3px rgba(31, 111, 235, 0.12);
+  }
+}
+
+@keyframes pitMarkedTextConfirm {
+  0% {
+    box-shadow: 0 0 0 rgba(22, 163, 74, 0);
+  }
+  22% {
+    box-shadow: 0 0 0 4px rgba(22, 163, 74, 0.16);
+  }
+  100% {
+    box-shadow: 0 0 0 rgba(22, 163, 74, 0);
+  }
+}
+
+@keyframes pitMarkCheckPop {
+  0% {
+    opacity: 0;
+    transform: translateY(4px) scale(0.7);
+  }
+  18%, 72% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.9);
+  }
+}
+
+@keyframes pitMarkButtonSuccess {
+  0% {
+    transform: scale(1);
+  }
+  45% {
+    transform: scale(1.12);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+@keyframes pitMarkFlyToPanel {
+  0% {
+    opacity: 0;
+    transform: translate3d(-50%, -50%, 0) scale(0.94);
+  }
+  14% {
+    opacity: 1;
+  }
+  72% {
+    opacity: 1;
+    transform: translate3d(calc(var(--pit-fly-x) - 50%), calc(var(--pit-fly-y) - 50% - 12px), 0) scale(0.88);
+  }
+  100% {
+    opacity: 0;
+    transform: translate3d(calc(var(--pit-fly-x) - 50%), calc(var(--pit-fly-y) - 50%), 0) scale(0.72);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pit-ask-panel.is-receiving-mark,
+  .pit-panel-note.is-receiving-mark,
+  .pit-manual-mark.is-confirmed,
+  .pit-mark-note-composer.is-sent,
+  .pit-mark-note-composer.is-hover-note,
+  .pit-selection-action[data-feedback="success"],
+  .pit-curtain-stage,
+  .pit-curtain-stage > .pit-replaced {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+
+  .pit-mark-flyout {
+    display: none;
+  }
 }

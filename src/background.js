@@ -2,11 +2,14 @@ const DEFAULT_SETTINGS = {
   provider: "ollama",
   mode: "append",
   translationStyle: "bar",
+  shortTextReplaceMode: false,
   markStyle: "highlight",
   markHighlightColor: "#fff2a8",
-  autoSendMarkedToNote: true,
+  markHighlightColorLight: "#fff2a8",
+  markHighlightColorDark: "#facc15",
   translationFontSize: 100,
   translationLineHeight: 1.4,
+  noteSaveShortcut: "enter",
   autoOpenPanel: true,
   model: "qwen3.5:4b",
   baseUrl: "http://localhost:11434",
@@ -24,14 +27,20 @@ const OLLAMA_TASK_TIMEOUT_MS = 45000;
 const OLLAMA_PREWARM_TIMEOUT_MS = 8000;
 const OLLAMA_WARM_TTL_MS = 25 * 60 * 1000;
 const ollamaWarmState = new Map();
+const CONTEXT_MENU_ITEMS = [
+  { id: "pit_open_reader_panel", title: "打开页面阅读助手", contexts: ["page", "selection"] },
+  { id: "pit_translate_current_page", title: "翻译当前页面", contexts: ["page", "selection"] },
+  { id: "pit_translate_selection", title: "翻译选中内容", contexts: ["selection"] },
+  { id: "pit_mark_selection", title: "标记选中内容", contexts: ["selection"] }
+];
+
+chrome.runtime.onInstalled.addListener(createContextMenus);
+chrome.runtime.onStartup.addListener(createContextMenus);
 
 chrome.action.onClicked.addListener(async (tab) => {
   try {
     const settings = await chrome.storage.sync.get(DEFAULT_SETTINGS);
-    await sendContentMessage(tab, {
-      type: "OPEN_ASK_PANEL",
-      settings
-    });
+    await runReaderAction(tab, "open_reader_panel", settings);
   } catch (error) {
     console.warn("[PIT] failed to open page panel", error);
   }
@@ -42,20 +51,26 @@ chrome.commands.onCommand.addListener(async (command, tab) => {
     const activeTab = tab?.id ? tab : await getActiveTab();
     if (!activeTab?.id) return;
     const settings = await chrome.storage.sync.get(DEFAULT_SETTINGS);
-    if (command === "open_reader_panel") {
-      await sendContentMessage(activeTab, { type: "OPEN_ASK_PANEL", settings });
-      return;
-    }
-    if (command === "translate_current_page") {
-      await sendContentMessage(activeTab, { type: "OPEN_ASK_PANEL", settings });
-      await sendContentMessage(activeTab, { type: "TRANSLATE_PAGE", settings });
-      return;
-    }
-    if (command === "send_selection_to_note") {
-      await sendContentMessage(activeTab, { type: "APPEND_SELECTION_TO_NOTE", settings });
-    }
+    await runReaderAction(activeTab, command, settings);
   } catch (error) {
     console.warn("[PIT] command failed", command, error);
+  }
+});
+
+chrome.contextMenus.onClicked.addListener(async (info, tab) => {
+  try {
+    const settings = await chrome.storage.sync.get(DEFAULT_SETTINGS);
+    const actionByMenuId = {
+      pit_open_reader_panel: "open_reader_panel",
+      pit_translate_current_page: "translate_current_page",
+      pit_translate_selection: "translate_selection",
+      pit_mark_selection: "mark_selection"
+    };
+    await runReaderAction(tab, actionByMenuId[info.menuItemId], settings, {
+      selectionText: info.selectionText || ""
+    });
+  } catch (error) {
+    console.warn("[PIT] context menu failed", info?.menuItemId, error);
   }
 });
 
@@ -82,9 +97,23 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message?.type === "CLEAN_NOTE_CONTENT") {
+    cleanNoteContent(message.note, message.settings)
+      .then((cleanedNote) => sendResponse({ ok: true, cleanedNote }))
+      .catch((error) => sendResponse({ ok: false, error: humanizeError(error) }));
+    return true;
+  }
+
   if (message?.type === "BUILD_ARTICLE_OVERVIEW") {
     buildArticleOverview(message.page, message.settings)
       .then((overview) => sendResponse({ ok: true, overview }))
+      .catch((error) => sendResponse({ ok: false, error: humanizeError(error) }));
+    return true;
+  }
+
+  if (message?.type === "GENERATE_NOTE_TITLE") {
+    generateSummaryNoteTitle(message.page, message.note, message.settings)
+      .then((noteTitle) => sendResponse({ ok: true, noteTitle }))
       .catch((error) => sendResponse({ ok: false, error: humanizeError(error) }));
     return true;
   }
@@ -110,6 +139,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message?.type === "FETCH_PDF_AS_BASE64") {
+    fetchPdfAsBase64(message.url)
+      .then((result) => sendResponse({ ok: true, ...result }))
+      .catch((error) => sendResponse({ ok: false, error: humanizeError(error) }));
+    return true;
+  }
+
   return false;
 });
 
@@ -129,6 +165,34 @@ async function sendContentMessage(tab, message) {
     });
     return chrome.tabs.sendMessage(tab.id, message);
   }
+}
+
+function createContextMenus() {
+  if (!chrome.contextMenus?.removeAll) return;
+  chrome.contextMenus.removeAll(() => {
+    for (const item of CONTEXT_MENU_ITEMS) {
+      chrome.contextMenus.create({
+        id: item.id,
+        title: item.title,
+        contexts: item.contexts,
+        documentUrlPatterns: ["http://*/*", "https://*/*", "file:///*"]
+      });
+    }
+  });
+}
+
+async function runReaderAction(tab, action, settings, options = {}) {
+  if (!action) return;
+  if (action === "open_reader_panel") {
+    await sendContentMessage(tab, { type: "OPEN_ASK_PANEL", settings });
+    return;
+  }
+  await sendContentMessage(tab, {
+    type: "RUN_READER_ACTION",
+    action,
+    settings,
+    selectionText: options.selectionText || ""
+  });
 }
 
 function canInjectIntoUrl(url) {
@@ -187,6 +251,35 @@ async function translateBatch(texts, settings = {}) {
   }
 
   return translateWithOllama(cleanTexts, resolved);
+}
+
+async function fetchPdfAsBase64(url) {
+  const pdfUrl = String(url || "").trim();
+  if (!/^https?:\/\//i.test(pdfUrl) && !/^file:\/\//i.test(pdfUrl)) {
+    throw new Error("PDF 链接无效。");
+  }
+
+  const response = await fetch(pdfUrl, { credentials: "include" });
+  if (!response.ok) {
+    throw new Error(`PDF 下载失败：${response.status} ${response.statusText}`);
+  }
+
+  const contentType = response.headers.get("content-type") || "";
+  const buffer = await response.arrayBuffer();
+  return {
+    base64: arrayBufferToBase64(buffer),
+    contentType
+  };
+}
+
+function arrayBufferToBase64(buffer) {
+  const bytes = new Uint8Array(buffer);
+  const chunkSize = 0x8000;
+  let binary = "";
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+  }
+  return btoa(binary);
 }
 
 // ─── 非流式批量 Ollama（视口外段落）─────────────────────────────
@@ -261,7 +354,7 @@ async function streamOpenAICompatibleToPort(text, settings = {}, port, controlle
       messages: [
         {
           role: "system",
-          content: "Translate any non-Simplified Chinese text to Simplified Chinese. Convert Traditional Chinese to Simplified Chinese. Preserve markdown formatting. Output only the translation."
+          content: "Translate any non-Simplified Chinese text to Simplified Chinese. Convert Traditional Chinese to Simplified Chinese. Preserve existing markdown formatting, line breaks, and paragraph breaks, but do not add new bold, italic, code, heading, or other markdown styling. Do not translate or alter PITLINK or PITTOKEN placeholders. Output only the translation."
         },
         {
           role: "user",
@@ -278,6 +371,7 @@ async function streamOpenAICompatibleToPort(text, settings = {}, port, controlle
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let accumulated = "";
+  let posted = "";
   let lineBuf = "";
 
   while (!controller.signal.aborted) {
@@ -304,7 +398,9 @@ async function streamOpenAICompatibleToPort(text, settings = {}, port, controlle
         const chunk = obj?.choices?.[0]?.delta?.content || "";
         if (chunk) {
           accumulated += chunk;
-          safePost(port, { type: "chunk", chunk });
+          const next = getVisibleStreamDelta(accumulated, posted);
+          posted = next.posted;
+          if (next.delta) safePost(port, { type: "chunk", chunk: next.delta });
         }
       } catch {
         // 忽略不完整 SSE 行
@@ -347,7 +443,7 @@ async function streamOllamaToPort(text, settings = {}, port, controller) {
         messages: [
           {
             role: "system",
-            content: "Translate the text to Simplified Chinese. Convert Traditional Chinese to Simplified Chinese. Preserve markdown, line breaks, and paragraph breaks. Do not translate or alter URLs/link placeholders. Output only the translation."
+            content: "Translate the text to Simplified Chinese. Convert Traditional Chinese to Simplified Chinese. Preserve existing markdown, line breaks, and paragraph breaks, but do not add new bold, italic, code, heading, or other markdown styling. Do not translate or alter URLs/link placeholders. Do not translate or alter PITLINK or PITTOKEN placeholders. Output only the translation."
           },
           {
             role: "user",
@@ -365,6 +461,7 @@ async function streamOllamaToPort(text, settings = {}, port, controller) {
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let accumulated = "";
+    let posted = "";
     let lineBuf = "";
     let done = false;
 
@@ -383,7 +480,9 @@ async function streamOllamaToPort(text, settings = {}, port, controller) {
           const chunk = obj?.message?.content || "";
           if (chunk) {
             accumulated += chunk;
-            safePost(port, { type: "chunk", chunk });
+            const next = getVisibleStreamDelta(accumulated, posted);
+            posted = next.posted;
+            if (next.delta) safePost(port, { type: "chunk", chunk: next.delta });
           }
           if (obj.done) {
             done = true;
@@ -451,7 +550,7 @@ async function prewarmOllama(settings = {}) {
           num_gpu: 99
         },
         messages: [
-          { role: "system", content: "Translate the text to Simplified Chinese. Output only the translation." },
+          { role: "system", content: "Translate the text to Simplified Chinese. Do not translate or alter PITLINK or PITTOKEN placeholders. Output only the translation." },
           { role: "user", content: "/no_think\nwarm up" }
         ]
       })
@@ -492,8 +591,9 @@ function markOllamaWarm(settings = {}) {
 }
 
 async function saveMarkdownNote(page = {}, note = "", options = {}) {
-  const noteTitle = buildMeaningfulNoteTitle(page, note);
-  const markdown = buildMarkdownNote(page, note, options, noteTitle);
+  const savedNote = String(note || "").trim();
+  const noteTitle = normalizeGeneratedNoteTitle(page.noteTitle) || buildMeaningfulNoteTitle(page, savedNote);
+  const markdown = buildMarkdownNote(page, savedNote, options, noteTitle);
   const saveDir = sanitizePathPart(options.saveDir || "page-notes");
   const filename = `${saveDir}/${makeMarkdownFilename(noteTitle)}`;
   const dataUrl = `data:text/markdown;charset=utf-8,${encodeURIComponent(`\uFEFF${markdown}`)}`;
@@ -506,6 +606,115 @@ async function saveMarkdownNote(page = {}, note = "", options = {}) {
   });
 
   return { filename };
+}
+
+async function cleanNoteContent(note = "", settings = {}) {
+  const original = String(note || "").trim();
+  if (!original) return "";
+
+  try {
+    const raw = await chatWithConfiguredProvider(settings, [
+      {
+        role: "system",
+        content: [
+          "你是 Markdown 笔记清洗器。",
+          "删除内容中重复或语义高度重复的句子、段落和要点，只保留信息最完整的一份。",
+          "保留原有事实、观点、引用、链接、代码、标题层级和 Markdown 结构。",
+          "必须保留“标记内容”与下一行缩进“笔记”的父子关系，不要改变缩进层级。",
+          "不要总结，不要扩写，不要改写含义，不要添加任何新信息。",
+          "如果没有重复内容，原样返回。",
+          "只输出清洗后的 Markdown，不要解释，不要使用代码围栏。"
+        ].join("")
+      },
+      {
+        role: "user",
+        content: original
+      }
+    ], {
+      num_predict: Math.min(6000, Math.max(600, original.length + 200)),
+      num_ctx: 16384,
+      timeoutMs: 22000
+    });
+
+    const cleaned = normalizeCleanedNote(raw);
+    if (!cleaned || cleaned.length > original.length * 1.15) {
+      throw new Error("LLM 返回的清洗结果无效。");
+    }
+    return cleaned;
+  } catch (error) {
+    console.warn("[PIT] note cleaning failed; saving original note", error);
+    return original;
+  }
+}
+
+async function chatWithConfiguredProvider(settings = {}, messages, options = {}) {
+  const resolved = { ...DEFAULT_SETTINGS, ...settings };
+  if (resolved.provider !== "openaiCompatible") {
+    return chatWithLocalOllama(resolved, messages, options);
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), options.timeoutMs || OLLAMA_TASK_TIMEOUT_MS);
+  const headers = { "Content-Type": "application/json" };
+  if (resolved.apiKey) headers.Authorization = `Bearer ${resolved.apiKey}`;
+
+  try {
+    const response = await fetch(openAICompatibleChatEndpoint(resolved.baseUrl), {
+      method: "POST",
+      headers,
+      signal: controller.signal,
+      body: JSON.stringify({
+        model: resolved.model,
+        temperature: 0,
+        max_tokens: options.num_predict || 2000,
+        messages
+      })
+    });
+    if (!response.ok) {
+      throw new Error(`API request failed: ${response.status} ${await response.text()}`);
+    }
+    const data = await response.json();
+    return data?.choices?.[0]?.message?.content || "";
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function normalizeCleanedNote(text) {
+  return stripModelNoise(text)
+    .replace(/^\s*```(?:markdown|md)?\s*\n?/i, "")
+    .replace(/\n?```\s*$/i, "")
+    .replace(/\n{4,}/g, "\n\n\n")
+    .trim();
+}
+
+async function generateSummaryNoteTitle(page = {}, note = "", options = {}) {
+  const fallback = buildMeaningfulNoteTitle(page, note);
+  const source = buildTitleSourceText(page, note);
+  if (source.length < 20) return fallback;
+
+  try {
+    const raw = await chatWithLocalOllama(options, [
+      {
+        role: "system",
+        content: [
+          "你是中文笔记标题生成器。",
+          "根据文章总结、翻译和笔记，生成一个不超过12个汉字的中文标题。",
+          "标题要具体、有信息量，避免“文章总结”“网页笔记”等泛泛表达。",
+          "只输出标题本身，不要解释、引号、标点或 Markdown。"
+        ].join("")
+      },
+      {
+        role: "user",
+        content: `页面标题：${page.title || ""}\n\n内容：\n${source}`
+      }
+    ], { num_predict: 40, num_ctx: 4096, timeoutMs: 12000 });
+    const title = normalizeGeneratedNoteTitle(raw);
+    return title || fallback;
+  } catch (error) {
+    console.warn("[PIT] note title generation failed", error);
+    return fallback;
+  }
 }
 
 async function buildArticleOverview(page = {}, settings = {}) {
@@ -813,7 +1022,7 @@ function pageToXConversationText(page = {}) {
 
 function buildMarkdownNote(page, note, options, noteTitle = "") {
   const title = noteTitle || buildMeaningfulNoteTitle(page, note);
-  const lines = [`# ${escapeMarkdownHeading(title)}`, ""];
+  const lines = [`### **${escapeMarkdownHeading(title)}**`, ""];
   lines.push(`保存时间：${new Date().toLocaleString("zh-CN")}`, "");
 
   if (options.saveUrl && page.url) {
@@ -847,15 +1056,13 @@ function buildMarkdownNote(page, note, options, noteTitle = "") {
 }
 
 function makeMarkdownFilename(title) {
-  const date = getLocalDateString();
-  const slug = sanitizePathPart(String(title || "").replace(new RegExp(`^${date}\\s*[-_—]\\s*`), ""))
+  const slug = sanitizeFilenamePart(String(title || ""))
     .replace(/\s+/g, "-")
     .slice(0, 80) || "page-note";
-  return `${date}-${slug}.md`;
+  return `${slug}.md`;
 }
 
 function buildMeaningfulNoteTitle(page = {}, note = "") {
-  const date = getLocalDateString();
   const blocks = Array.isArray(page.blocks) ? page.blocks : [];
   const contentSource = [
     note,
@@ -864,7 +1071,30 @@ function buildMeaningfulNoteTitle(page = {}, note = "") {
     blocks.map((block) => block.translation).filter(Boolean).slice(0, 2).join(" ")
   ].filter(Boolean).join(" ");
   const topic = summarizeTitleText(contentSource) || "网页笔记";
-  return `${date} - ${topic}`;
+  return normalizeGeneratedNoteTitle(topic) || "网页笔记";
+}
+
+function buildTitleSourceText(page = {}, note = "") {
+  const blocks = Array.isArray(page.blocks) ? page.blocks : [];
+  return [
+    page.summary,
+    note,
+    blocks.map((block) => block.translation).filter(Boolean).slice(0, 8).join("\n"),
+    blocks.map((block) => block.original).filter(Boolean).slice(0, 5).join("\n")
+  ].filter(Boolean).join("\n\n").slice(0, 6000);
+}
+
+function normalizeGeneratedNoteTitle(title) {
+  const cleaned = stripModelNoise(title)
+    .replace(/^#+\s*/gm, "")
+    .replace(/^(?:标题|总结标题|文件名)\s*[:：]\s*/i, "")
+    .replace(/[《》“”"'`*_#\[\](){}<>]/g, "")
+    .replace(/[，。！？、；：,.!?;:|/\\]+$/g, "")
+    .replace(/\s+/g, "")
+    .trim();
+  if (!cleaned) return "";
+  const chars = Array.from(cleaned);
+  return chars.slice(0, 12).join("");
 }
 
 function summarizeTitleText(text) {
@@ -883,26 +1113,35 @@ function summarizeTitleText(text) {
   return (hasCjk ? compact.slice(0, 34) : compact.split(/\s+/).slice(0, 10).join(" ")).trim() || "网页笔记";
 }
 
-function getLocalDateString() {
-  const now = new Date();
-  const year = now.getFullYear();
-  const month = String(now.getMonth() + 1).padStart(2, "0");
-  const day = String(now.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
-}
-
 function sanitizePathPart(value) {
   const raw = String(value || "").trim();
   if (/^(?:\/|~\/|[a-zA-Z]:[\\/])/.test(raw)) {
     throw new Error("保存目录不能填写绝对路径。请把 Chrome 下载位置设为 Obsidian 库，再在插件里填写子文件夹名，例如 WebNotes。");
   }
-  return raw
+  const normalized = raw
     .replace(/\\/g, "/")
     .replace(/^\/+|\/+$/g, "")
     .replace(/\.\.+/g, "")
-    .replace(/[<>:"|?*\x00-\x1F]/g, "")
-    .replace(/\/{2,}/g, "/")
-    .trim() || "page-notes";
+    .replace(/\/{2,}/g, "/");
+  const cleaned = normalized
+    .split("/")
+    .map(sanitizeFilenamePart)
+    .filter(Boolean)
+    .join("/");
+  return cleaned || "page-notes";
+}
+
+function sanitizeFilenamePart(value) {
+  const cleaned = String(value || "")
+    .normalize("NFKC")
+    .replace(/[\u200B-\u200D\uFEFF]/g, "")
+    .replace(/[<>:"/\\|?*\x00-\x1F]/g, " ")
+    .replace(/\s+/g, " ")
+    .replace(/^\.+|\.+$/g, "")
+    .trim();
+  if (!cleaned || cleaned === "." || cleaned === "..") return "";
+  if (/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(cleaned)) return `_${cleaned}`;
+  return cleaned;
 }
 
 function escapeMarkdownHeading(text) {
@@ -915,7 +1154,7 @@ function buildSingleMessage(text) {
   return [
     {
       role: "system",
-      content: "Translate any non-Simplified Chinese text to Simplified Chinese. Convert Traditional Chinese to Simplified Chinese. Output only the translated text, nothing else."
+      content: "Translate any non-Simplified Chinese text to Simplified Chinese. Convert Traditional Chinese to Simplified Chinese. Preserve existing markdown formatting, line breaks, and paragraph breaks, but do not add new bold, italic, code, heading, or other markdown styling. Do not translate or alter PITLINK or PITTOKEN placeholders. Output only the translated text, nothing else."
     },
     {
       role: "user",
@@ -929,7 +1168,7 @@ function buildMessages(texts) {
   return [
     {
       role: "system",
-      content: "Non-Simplified Chinese→Simplified Chinese translator. Convert Traditional Chinese to Simplified Chinese. No notes or <think> blocks. Return only compact JSON: {\"translations\":[\"...\"]}."
+      content: "Non-Simplified Chinese→Simplified Chinese translator. Convert Traditional Chinese to Simplified Chinese. Preserve existing markdown formatting, line breaks, and paragraph breaks, but do not add new bold, italic, code, heading, or other markdown styling. Do not translate or alter PITLINK or PITTOKEN placeholders. No notes or <think> blocks. Return only compact JSON: {\"translations\":[\"...\"]}."
     },
     {
       role: "user",
@@ -965,7 +1204,8 @@ function parseTranslationArray(content, expectedLength) {
 
   return Array.from({ length: expectedLength }, (_, index) => {
     const translated = translations[index];
-    return typeof translated === "string" && translated.trim() ? translated.trim() : "";
+    const cleaned = typeof translated === "string" ? stripModelNoise(translated) : "";
+    return cleaned.trim() ? cleaned.trim() : "";
   });
 }
 
@@ -985,11 +1225,62 @@ function parseJsonPayload(content) {
 }
 
 function stripModelNoise(content) {
-  return String(content)
-    .replace(/<think>[\s\S]*?<\/think>/gi, "")
+  let cleaned = String(content || "")
+    .replace(/<think\b[^>]*>[\s\S]*?(?:<\/think>|$)/gi, "")
+    .replace(/<thinking\b[^>]*>[\s\S]*?(?:<\/thinking>|$)/gi, "")
+    .replace(/^\s*(?:\/?no[_\s-]*think|<no[_\s-]*think\s*\/?>)\s*$/gim, "")
     .replace(/```(?:json)?/gi, "")
     .replace(/```/g, "")
     .trim();
+
+  cleaned = stripLeadingReasoningBlock(cleaned);
+  return cleaned.trim();
+}
+
+function getVisibleStreamDelta(content, posted) {
+  if (shouldHoldLeadingControlPrefix(content)) {
+    return { posted, delta: "" };
+  }
+
+  const visible = stripModelNoise(content);
+  if (!visible) return { posted: "", delta: "" };
+
+  const previous = String(posted || "");
+  const delta = visible.startsWith(previous) ? visible.slice(previous.length) : visible;
+  return { posted: visible, delta };
+}
+
+function shouldHoldLeadingControlPrefix(content) {
+  const value = String(content || "").trimStart().toLowerCase();
+  if (!value) return true;
+
+  const markers = [
+    "/no_think",
+    "/no think",
+    "no_think",
+    "no think",
+    "<no_think",
+    "<no think",
+    "<think",
+    "<thinking"
+  ];
+
+  return markers.some((marker) => marker.startsWith(value) && value.length < marker.length);
+}
+
+function stripLeadingReasoningBlock(text) {
+  const value = String(text || "").trim();
+  if (!value) return "";
+
+  const finalMatch = value.match(/(?:^|\n)\s*(?:翻译|译文|结果|答案|translation|translated text|answer|final)\s*[:：]\s*/i);
+  if (finalMatch && finalMatch.index !== undefined) {
+    const before = value.slice(0, finalMatch.index);
+    if (/^\s*(?:思考|推理|分析|reasoning|thought|thinking)\s*[:：]/i.test(before.trim())) {
+      return value.slice(finalMatch.index + finalMatch[0].length);
+    }
+  }
+
+  return value.replace(/^\s*(?:思考|推理|分析|reasoning|thought|thinking)\s*[:：]\s*(?:无|none|no[_\s-]*think|no thinking)?\s*[\r\n]+/i, "");
 }
 
 function extractBalancedJson(text, openChar, closeChar) {

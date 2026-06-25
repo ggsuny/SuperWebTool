@@ -2,11 +2,17 @@ const DEFAULT_SETTINGS = {
   provider: "ollama",
   mode: "append",
   translationStyle: "bar",
+  shortTextReplaceMode: false,
+  markStyle: "highlight",
+  markHighlightColor: "#fff2a8",
+  markHighlightColorLight: "#fff2a8",
+  markHighlightColorDark: "#facc15",
   model: "qwen3.5:4b",
   baseUrl: "http://localhost:11434",
   apiKey: "",
   summaryPrompt: "",
   saveDir: "page-notes",
+  noteSaveShortcut: "enter",
   saveUrl: true,
   saveOriginal: true,
   saveTranslation: true,
@@ -23,12 +29,14 @@ const controls = {
   panels: Array.from(document.querySelectorAll(".tab-panel")),
   mode: document.querySelector("#mode"),
   translationStyle: document.querySelector("#translationStyle"),
+  shortTextReplaceMode: document.querySelector("#shortTextReplaceMode"),
   provider: document.querySelector("#provider"),
   ollamaModel: document.querySelector("#ollamaModel"),
   model: document.querySelector("#model"),
   baseUrl: document.querySelector("#baseUrl"),
   apiKey: document.querySelector("#apiKey"),
   saveDir: document.querySelector("#saveDir"),
+  noteSaveShortcut: document.querySelector("#noteSaveShortcut"),
   summaryPrompt: document.querySelector("#summaryPrompt"),
   summaryCard: document.querySelector("#summaryCard"),
   summaryResult: document.querySelector("#summaryResult"),
@@ -57,11 +65,24 @@ let askOverviewLoaded = false;
 let askOverviewMarkdown = "";
 let askMessages = [];
 let currentUiStateKey = UI_STATE_KEY;
+let retainedMarkSettings = {
+  markStyle: DEFAULT_SETTINGS.markStyle,
+  markHighlightColor: DEFAULT_SETTINGS.markHighlightColor,
+  markHighlightColorLight: DEFAULT_SETTINGS.markHighlightColorLight,
+  markHighlightColorDark: DEFAULT_SETTINGS.markHighlightColorDark
+};
 
 init();
 
 async function init() {
   const settings = await loadSettings();
+  retainedMarkSettings = {
+    markStyle: settings.markStyle,
+    markHighlightColor: settings.markHighlightColor,
+    markHighlightColorLight: settings.markHighlightColorLight,
+    markHighlightColorDark: settings.markHighlightColorDark
+  };
+  chrome.storage.onChanged.addListener(updateRetainedMarkSettings);
   applySettings(settings);
   bindTabs();
   currentUiStateKey = await getUiStateKey();
@@ -70,8 +91,8 @@ async function init() {
 
   ["change", "input"].forEach((eventName) => {
     [
-      "mode", "translationStyle", "provider", "ollamaModel", "model", "baseUrl",
-      "apiKey", "saveDir", "summaryPrompt", "userNote", "saveUrl", "saveOriginal",
+      "mode", "translationStyle", "shortTextReplaceMode", "provider", "ollamaModel", "model", "baseUrl",
+      "apiKey", "saveDir", "noteSaveShortcut", "summaryPrompt", "userNote", "saveUrl", "saveOriginal",
       "saveTranslation", "saveSummary", "saveNote", "allowWebSearch"
     ].forEach((key) => {
       controls[key].addEventListener(eventName, persistSettings);
@@ -203,6 +224,10 @@ async function saveMarkdownNote() {
       page,
       note: controls.userNote.value.trim(),
       options: {
+        provider: settings.provider,
+        model: settings.model,
+        baseUrl: settings.baseUrl,
+        apiKey: settings.apiKey,
         saveDir: settings.saveDir,
         saveUrl: settings.saveUrl,
         saveOriginal: settings.saveOriginal,
@@ -321,11 +346,13 @@ async function loadSettings() {
 function applySettings(settings) {
   controls.mode.value = settings.mode;
   controls.translationStyle.value = settings.translationStyle || DEFAULT_SETTINGS.translationStyle;
+  controls.shortTextReplaceMode.checked = Boolean(settings.shortTextReplaceMode);
   controls.provider.value = settings.provider;
   controls.model.value = settings.model;
   controls.baseUrl.value = settings.baseUrl;
   controls.apiKey.value = settings.apiKey;
   controls.saveDir.value = settings.saveDir || DEFAULT_SETTINGS.saveDir;
+  controls.noteSaveShortcut.value = settings.noteSaveShortcut || DEFAULT_SETTINGS.noteSaveShortcut;
   controls.summaryPrompt.value = settings.summaryPrompt || "";
   controls.userNote.value = settings.userNote || "";
   controls.allowWebSearch.checked = Boolean(settings.allowWebSearch);
@@ -346,13 +373,16 @@ async function persistSettings() {
 function readSettings() {
   const isOllama = controls.provider.value === "ollama";
   return {
+    ...retainedMarkSettings,
     mode: controls.mode.value,
     translationStyle: controls.translationStyle.value,
+    shortTextReplaceMode: controls.shortTextReplaceMode.checked,
     provider: controls.provider.value,
     model: (isOllama ? controls.ollamaModel.value || controls.model.value : controls.model.value).trim(),
     baseUrl: controls.baseUrl.value.trim(),
     apiKey: controls.apiKey.value.trim(),
     saveDir: normalizeSaveDir(controls.saveDir.value),
+    noteSaveShortcut: controls.noteSaveShortcut.value === "enter" ? "enter" : "cmdEnter",
     summaryPrompt: controls.summaryPrompt.value.trim(),
     userNote: controls.userNote.value,
     allowWebSearch: controls.allowWebSearch.checked,
@@ -362,6 +392,15 @@ function readSettings() {
     saveSummary: controls.saveSummary.checked,
     saveNote: controls.saveNote.checked
   };
+}
+
+function updateRetainedMarkSettings(changes, areaName) {
+  if (areaName !== "sync") return;
+  for (const key of Object.keys(retainedMarkSettings)) {
+    if (changes[key]?.newValue !== undefined) {
+      retainedMarkSettings[key] = changes[key].newValue;
+    }
+  }
 }
 
 function getProviderDefaults(provider) {
