@@ -21,6 +21,7 @@
   "web_accessible_resources": [
     {
       "resources": [
+        "dev-reload.txt",
         "pdf-extractor.html",
         "src/pdf-extractor.js",
         "vendor/pdf.min.js",
@@ -42,7 +43,7 @@
         "default": "Alt+Shift+T",
         "mac": "Alt+Shift+T"
       },
-      "description": "打开页面阅读助手并开始翻译"
+      "description": "翻译当前页面"
     },
     "mark_selection": {
       "suggested_key": {

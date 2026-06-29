@@ -10,7 +10,7 @@ const DEFAULT_SETTINGS = {
   translationFontSize: 100,
   translationLineHeight: 1.4,
   noteSaveShortcut: "enter",
-  autoOpenPanel: true,
+  autoOpenPanel: false,
   model: "qwen3.5:4b",
   baseUrl: "http://localhost:11434",
   apiKey: ""
@@ -76,6 +76,12 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
 
 // ─── 消息路由 ────────────────────────────────────────────────
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type === "DEV_RELOAD_EXTENSION") {
+    sendResponse({ ok: true });
+    setTimeout(() => chrome.runtime.reload(), 40);
+    return false;
+  }
+
   if (message?.type === "LIST_OLLAMA_MODELS") {
     listOllamaModels(message.baseUrl)
       .then((models) => sendResponse({ ok: true, models }))
@@ -100,6 +106,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "CLEAN_NOTE_CONTENT") {
     cleanNoteContent(message.note, message.settings)
       .then((cleanedNote) => sendResponse({ ok: true, cleanedNote }))
+      .catch((error) => sendResponse({ ok: false, error: humanizeError(error) }));
+    return true;
+  }
+
+  if (message?.type === "BUILD_ORIGINAL_SUMMARY") {
+    buildOriginalSummaryForNote(message.page, message.settings)
+      .then((originalSummary) => sendResponse({ ok: true, originalSummary }))
       .catch((error) => sendResponse({ ok: false, error: humanizeError(error) }));
     return true;
   }
@@ -146,8 +159,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message?.type === "GET_COMMAND_SHORTCUT") {
+    getCommandShortcut(message.command)
+      .then((shortcut) => sendResponse({ ok: true, shortcut }))
+      .catch((error) => sendResponse({ ok: false, error: humanizeError(error) }));
+    return true;
+  }
+
   return false;
 });
+
+async function getCommandShortcut(commandName) {
+  const command = String(commandName || "").trim();
+  if (!command || !chrome.commands?.getAll) return "";
+  const commands = await chrome.commands.getAll();
+  return commands.find((item) => item.name === command)?.shortcut || "";
+}
 
 async function sendContentMessage(tab, message) {
   if (!tab?.id || !canInjectIntoUrl(tab.url)) return;
@@ -593,7 +620,12 @@ function markOllamaWarm(settings = {}) {
 async function saveMarkdownNote(page = {}, note = "", options = {}) {
   const savedNote = String(note || "").trim();
   const noteTitle = normalizeGeneratedNoteTitle(page.noteTitle) || buildMeaningfulNoteTitle(page, savedNote);
-  const markdown = buildMarkdownNote(page, savedNote, options, noteTitle);
+  const originalSummary = options.saveOriginal
+    ? String(page.originalSummary || "").trim() || buildExtractiveSummary(pageToArticleText(page))
+    : "";
+  const markdown = cleanMarkdownForExport(
+    buildMarkdownNote({ ...page, originalSummary }, savedNote, options, noteTitle)
+  );
   const saveDir = sanitizePathPart(options.saveDir || "page-notes");
   const filename = `${saveDir}/${makeMarkdownFilename(noteTitle)}`;
   const dataUrl = `data:text/markdown;charset=utf-8,${encodeURIComponent(`\uFEFF${markdown}`)}`;
@@ -608,8 +640,77 @@ async function saveMarkdownNote(page = {}, note = "", options = {}) {
   return { filename };
 }
 
+async function buildOriginalSummaryForNote(page = {}, settings = {}) {
+  const articleText = pageToArticleText(page).slice(0, 16000);
+  if (articleText.length < 80) return "";
+
+  try {
+    const raw = await chatWithConfiguredProvider(settings, [
+      {
+        role: "system",
+        content: [
+          "你是网页笔记的原文总结助手。",
+          "只依据提供的网页正文总结，不使用外部知识。",
+          "忽略导航、按钮、登录、订阅、分享、相关推荐、页脚和链接列表等页面噪声。",
+          "用简体中文写2到4条简短 Markdown 要点，说明文章主题、核心观点以及关键事实。",
+          "不要写“本文主要讲了”等空话，不要添加标题，不要输出代码围栏。",
+          "总长度控制在180字以内。"
+        ].join("")
+      },
+      {
+        role: "user",
+        content: `网页标题：${page.title || ""}\n\n网页正文：\n${articleText}`
+      }
+    ], {
+      num_predict: 360,
+      num_ctx: 8192,
+      timeoutMs: 18000
+    });
+    const summary = normalizeOriginalSummary(raw);
+    if (summary) return summary;
+  } catch (error) {
+    console.warn("[PIT] original summary generation failed; using extractive fallback", error);
+  }
+
+  return buildExtractiveSummary(articleText);
+}
+
+function normalizeOriginalSummary(text) {
+  const cleaned = stripModelNoise(text)
+    .replace(/^\s*```(?:markdown|md)?\s*\n?/i, "")
+    .replace(/\n?```\s*$/i, "")
+    .replace(/^\s*#{1,6}\s*(?:原文总结|总结|摘要)\s*$/gim, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+  if (!cleaned) return "";
+  if (/^\s*[-*]\s+/m.test(cleaned)) return cleaned;
+  return cleaned
+    .split(/(?<=[。！？.!?])\s+/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .slice(0, 4)
+    .map((item) => `- ${item}`)
+    .join("\n");
+}
+
+function buildExtractiveSummary(articleText) {
+  const sentences = String(articleText || "")
+    .replace(/[#*_`>|[\]{}]/g, " ")
+    .split(/(?<=[。！？.!?])\s+|\n+/)
+    .map((item) => item.replace(/\s+/g, " ").trim())
+    .filter((item) => item.length >= 24 && !isLikelyInterfaceText(item));
+  return sentences
+    .slice(0, 3)
+    .map((item) => `- ${Array.from(item).slice(0, 100).join("")}`)
+    .join("\n");
+}
+
+function isLikelyInterfaceText(text) {
+  return /^(?:登录|注册|订阅|分享|关注|返回|首页|菜单|更多|下一页|上一页|login|sign up|subscribe|share|follow|menu|more)\b/i.test(text);
+}
+
 async function cleanNoteContent(note = "", settings = {}) {
-  const original = String(note || "").trim();
+  const original = dedupeMarkdownNoteBlocks(String(note || "").trim());
   if (!original) return "";
 
   try {
@@ -617,10 +718,14 @@ async function cleanNoteContent(note = "", settings = {}) {
       {
         role: "system",
         content: [
-          "你是 Markdown 笔记清洗器。",
-          "删除内容中重复或语义高度重复的句子、段落和要点，只保留信息最完整的一份。",
-          "保留原有事实、观点、引用、链接、代码、标题层级和 Markdown 结构。",
-          "必须保留“标记内容”与下一行缩进“笔记”的父子关系，不要改变缩进层级。",
+          "你是 Markdown 笔记去重清洗器。",
+          "输入是一整份当前 Markdown 笔记，不是新增片段；请把所有标题、列表、段落、引用、代码块和用户写下的 Markdown 笔记都视为同一份当前内容的一部分来处理。",
+          "删除完全重复或语义高度重复的句子、段落、标题、列表项和要点，只保留信息最完整、上下文最清楚的一份。",
+          "如果普通段落和 Markdown 列表项表达同一件事，也要视为重复，保留更适合当前结构的一份。",
+          "保留原有事实、观点、引用、链接、代码、标题层级、列表层级和 Markdown 结构。",
+          "不得删除、转义或改写用户主动使用的 Markdown 标记，例如 #、-、1.、>、```、**、`。",
+          "允许整理不规范的 Markdown 空格和空行，但不要把列表拍平成段落，也不要把多行笔记合成一行。",
+          "必须保留“选中内容”或“标记内容”与其后用户内容的上下文关系；如果两组上下文重复，保留带有更完整用户笔记的一组。",
           "不要总结，不要扩写，不要改写含义，不要添加任何新信息。",
           "如果没有重复内容，原样返回。",
           "只输出清洗后的 Markdown，不要解释，不要使用代码围栏。"
@@ -628,7 +733,7 @@ async function cleanNoteContent(note = "", settings = {}) {
       },
       {
         role: "user",
-        content: original
+        content: `当前完整 Markdown 笔记如下：\n\n${original}`
       }
     ], {
       num_predict: Math.min(6000, Math.max(600, original.length + 200)),
@@ -636,7 +741,7 @@ async function cleanNoteContent(note = "", settings = {}) {
       timeoutMs: 22000
     });
 
-    const cleaned = normalizeCleanedNote(raw);
+    const cleaned = dedupeMarkdownNoteBlocks(normalizeCleanedNote(raw));
     if (!cleaned || cleaned.length > original.length * 1.15) {
       throw new Error("LLM 返回的清洗结果无效。");
     }
@@ -684,8 +789,89 @@ function normalizeCleanedNote(text) {
   return stripModelNoise(text)
     .replace(/^\s*```(?:markdown|md)?\s*\n?/i, "")
     .replace(/\n?```\s*$/i, "")
+    .replace(/^\s*当前完整\s*Markdown\s*笔记如下[：:]\s*/i, "")
     .replace(/\n{4,}/g, "\n\n\n")
     .trim();
+}
+
+function dedupeMarkdownNoteBlocks(markdown) {
+  const source = String(markdown || "")
+    .replace(/\r\n?/g, "\n")
+    .replace(/\u00A0/g, " ")
+    .replace(/[ \t]+$/gm, "")
+    .trim();
+  if (!source) return "";
+
+  const seenBlocks = new Set();
+  const chunks = splitMarkdownChunks(source);
+  const cleanedChunks = [];
+  for (const chunk of chunks) {
+    const cleanedChunk = dedupeMarkdownChunkLines(chunk);
+    const key = markdownDedupeKey(cleanedChunk);
+    if (!key) continue;
+    if (seenBlocks.has(key)) continue;
+    seenBlocks.add(key);
+    cleanedChunks.push(cleanedChunk);
+  }
+
+  return cleanedChunks
+    .join("\n\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function splitMarkdownChunks(markdown) {
+  const chunks = [];
+  const current = [];
+  let inFence = false;
+
+  const flush = () => {
+    const chunk = current.join("\n").trim();
+    current.length = 0;
+    if (chunk) chunks.push(chunk);
+  };
+
+  for (const line of String(markdown || "").split("\n")) {
+    if (/^\s*```/.test(line)) {
+      inFence = !inFence;
+      current.push(line);
+      continue;
+    }
+    if (!inFence && !line.trim()) {
+      flush();
+      continue;
+    }
+    current.push(line);
+  }
+  flush();
+  return chunks;
+}
+
+function dedupeMarkdownChunkLines(chunk) {
+  if (/^\s*```/m.test(chunk)) return chunk.trim();
+  const seenLines = new Set();
+  return String(chunk || "")
+    .split("\n")
+    .filter((line) => {
+      const key = markdownDedupeKey(line);
+      if (!key || /^\s{2,}\S/.test(line)) return true;
+      if (seenLines.has(key)) return false;
+      seenLines.add(key);
+      return true;
+    })
+    .join("\n")
+    .trim();
+}
+
+function markdownDedupeKey(value) {
+  return String(value || "")
+    .replace(/^\s{0,3}#{1,6}\s+/, "")
+    .replace(/^\s{0,3}(?:[-+*]|\d+[.)])\s+/, "")
+    .replace(/^\s{0,3}>\s?/, "")
+    .replace(/[*_`~[\]()#>-]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
 }
 
 async function generateSummaryNoteTitle(page = {}, note = "", options = {}) {
@@ -1029,12 +1215,12 @@ function buildMarkdownNote(page, note, options, noteTitle = "") {
     lines.push("## 原始链接", "", page.url, "");
   }
 
-  if (options.saveSummary && page.summary) {
-    lines.push("## 总结", "", page.summary.trim(), "");
-  }
-
   if (options.saveNote && note) {
     lines.push("## 我的笔记", "", note.trim(), "");
+  }
+
+  if (options.saveOriginal && page.originalSummary) {
+    lines.push("## 原文总结", "", page.originalSummary.trim(), "");
   }
 
   const blocks = Array.isArray(page.blocks) ? page.blocks : [];
@@ -1048,11 +1234,42 @@ function buildMarkdownNote(page, note, options, noteTitle = "") {
     if (translated) lines.push("## 中文翻译", "", translated, "");
   }
 
+  if (options.saveSummary && page.summary) {
+    lines.push("## Ask 内容", "", page.summary.trim(), "");
+  }
+
   if (!options.saveUrl && !options.saveSummary && !options.saveNote && !options.saveOriginal && !options.saveTranslation) {
     lines.push("> 未选择保存内容。", "");
   }
 
   return lines.join("\n").replace(/\n{4,}/g, "\n\n\n").trim() + "\n";
+}
+
+function cleanMarkdownForExport(markdown) {
+  const cleanedLines = String(markdown || "")
+    .normalize("NFKC")
+    .replace(/[\u00AD\u034F\u061C\u115F\u1160\u17B4\u17B5\u180E\u200B-\u200F\u202A-\u202E\u2060-\u206F\u3164\uFEFF\uFFA0]/g, "")
+    .replace(/\uFFFC|\uFFFD/g, "")
+    .replace(/\u00A0/g, " ")
+    .replace(/\r\n?/g, "\n")
+    .replace(/[ \t]+\n/g, "\n")
+    .split("\n")
+    .filter((line) => {
+      const value = line.trim();
+      if (!value) return true;
+      if (/^(?:[-_*~=·•▪▫◆◇●○■□▶▷►▸→—–|]\s*){4,}$/.test(value)) return false;
+      if (/^!?\[\s*]\(\s*\)$/.test(value)) return false;
+      return !/^[#>*_`~=-]{1,3}$/.test(value);
+    })
+    .map((line) => line
+      .replace(/[ \t]{2,}$/g, "")
+      .replace(/([。！？!?，,；;：:])\1{2,}/g, "$1$1")
+    );
+
+  return cleanedLines
+    .join("\n")
+    .replace(/\n{4,}/g, "\n\n\n")
+    .trim() + "\n";
 }
 
 function makeMarkdownFilename(title) {

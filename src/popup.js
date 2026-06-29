@@ -36,7 +36,6 @@ const controls = {
   baseUrl: document.querySelector("#baseUrl"),
   apiKey: document.querySelector("#apiKey"),
   saveDir: document.querySelector("#saveDir"),
-  noteSaveShortcut: document.querySelector("#noteSaveShortcut"),
   summaryPrompt: document.querySelector("#summaryPrompt"),
   summaryCard: document.querySelector("#summaryCard"),
   summaryResult: document.querySelector("#summaryResult"),
@@ -92,7 +91,7 @@ async function init() {
   ["change", "input"].forEach((eventName) => {
     [
       "mode", "translationStyle", "shortTextReplaceMode", "provider", "ollamaModel", "model", "baseUrl",
-      "apiKey", "saveDir", "noteSaveShortcut", "summaryPrompt", "userNote", "saveUrl", "saveOriginal",
+      "apiKey", "saveDir", "summaryPrompt", "userNote", "saveUrl", "saveOriginal",
       "saveTranslation", "saveSummary", "saveNote", "allowWebSearch"
     ].forEach((key) => {
       controls[key].addEventListener(eventName, persistSettings);
@@ -352,7 +351,6 @@ function applySettings(settings) {
   controls.baseUrl.value = settings.baseUrl;
   controls.apiKey.value = settings.apiKey;
   controls.saveDir.value = settings.saveDir || DEFAULT_SETTINGS.saveDir;
-  controls.noteSaveShortcut.value = settings.noteSaveShortcut || DEFAULT_SETTINGS.noteSaveShortcut;
   controls.summaryPrompt.value = settings.summaryPrompt || "";
   controls.userNote.value = settings.userNote || "";
   controls.allowWebSearch.checked = Boolean(settings.allowWebSearch);
@@ -382,7 +380,7 @@ function readSettings() {
     baseUrl: controls.baseUrl.value.trim(),
     apiKey: controls.apiKey.value.trim(),
     saveDir: normalizeSaveDir(controls.saveDir.value),
-    noteSaveShortcut: controls.noteSaveShortcut.value === "enter" ? "enter" : "cmdEnter",
+    noteSaveShortcut: "auto",
     summaryPrompt: controls.summaryPrompt.value.trim(),
     userNote: controls.userNote.value,
     allowWebSearch: controls.allowWebSearch.checked,

@@ -23,6 +23,7 @@ const PROTECTED_INLINE_TOKEN_PATTERN = /(?<![\p{L}\p{N}_])(?:[@#][\p{L}\p{N}_][\
 const COMMON_UNTRANSLATED_TERM_PATTERN = /\b(?:ETF|ETFs|SPY|QQQ|DIA|IWM|VIX|CPI|PCE|FOMC|Fed|GDP|CME|NYSE|NASDAQ|IPO|EPS|PE|P\/E|AI|API|GPU|CPU|LLM|SaaS|BTC|ETH|SOL|USDT|USDC|DeFi|NFT|Bearish|Bullish|Triple\s+Witching)\b/giu;
 const CACHE_PREFIX        = "pit_cache_";
 const NOTE_DRAFT_PREFIX   = "pit_note_draft_";
+const HOVER_NOTE_PROMPT   = "- 记一下";
 const PANEL_LAYOUT_KEY    = "pit_reader_panel_layout";
 const PANEL_MIN_WIDTH     = 320;
 const PANEL_MIN_HEIGHT    = 360;
@@ -33,6 +34,7 @@ const OVERVIEW_TIMEOUT_MS        = 22000;
 const OLLAMA_CONCURRENCY         = 1;
 const ONLINE_CONCURRENCY         = 4;
 const TWEET_GENERATION_TIMEOUT_MS = 45000;
+const DEV_RELOAD_POLL_MS = 1200;
 
 const OLLAMA_PARA_TIMEOUT_MS     = 22000;  // 单段最长 22s；2s 内用等待态给用户反馈
 
@@ -48,7 +50,7 @@ const DEFAULT_OLLAMA = {
   translationLineHeight: 1.4,
   noteSaveShortcut: "enter",
   shortTextReplaceMode: false,
-  autoOpenPanel: true
+  autoOpenPanel: false
 };
 
 const BLOCK_SELECTOR = [
@@ -87,11 +89,25 @@ const SKIP_SELECTOR = [
   ".pit-translation"
 ].join(",");
 
+const CONTENT_NOISE_SELECTOR = [
+  "nav", "header", "footer", "aside", "button", "input", "select", "textarea",
+  "[role='navigation']", "[role='banner']", "[role='contentinfo']", "[role='complementary']",
+  "[role='button']", "[aria-hidden='true']", "[hidden]",
+  ".nav", ".navbar", ".navigation", ".menu", ".sidebar", ".footer", ".header",
+  ".breadcrumb", ".breadcrumbs", ".pagination", ".pager", ".toolbar",
+  ".share", ".sharing", ".social", ".social-share", ".related", ".recommend",
+  ".recommendations", ".comments", ".comment-form", ".newsletter", ".subscribe",
+  ".advertisement", ".advert", ".ads", ".ad", "[class*='cookie']", "[id*='cookie']",
+  "[class*='paywall']", "[class*='promo']", "[class*='share']"
+].join(",");
+
 // paraId → { node, renderer, originalText }
 const streamingNodes = new Map();
 let lastArticleSnapshot = null;
 let lastSummaryText = "";
 let lastNoteTitle = "";
+let lastOriginalSummary = "";
+let originalSummaryPromise = null;
 let lastSeenUrl = location.href;
 let lastMousePoint = { x: 0, y: 0 };
 let lastDetectedPageTheme = "";
@@ -107,6 +123,32 @@ let hoverNoteComposers = new Map();
 const hoverNoteResizeObserver = typeof ResizeObserver === "function"
   ? new ResizeObserver(() => scheduleHoverNotePositionSync())
   : null;
+
+startDevelopmentAutoReload();
+
+async function startDevelopmentAutoReload() {
+  let lastStamp = "";
+  const check = async () => {
+    try {
+      const response = await fetch(chrome.runtime.getURL(`dev-reload.txt?t=${Date.now()}`), { cache: "no-store" });
+      if (!response.ok) return;
+      const stamp = (await response.text()).trim();
+      if (!stamp) return;
+      if (!lastStamp) {
+        lastStamp = stamp;
+        return;
+      }
+      if (stamp === lastStamp) return;
+      lastStamp = stamp;
+      chrome.runtime.sendMessage({ type: "DEV_RELOAD_EXTENSION" }).catch(() => {});
+      setTimeout(() => location.reload(), 80);
+    } catch {
+      // 开发辅助功能失败不影响页面功能。
+    }
+  };
+  await check();
+  setInterval(check, DEV_RELOAD_POLL_MS);
+}
 
 document.addEventListener("mouseup", (event) => {
   lastMousePoint = { x: event.clientX, y: event.clientY };
@@ -144,6 +186,8 @@ setInterval(() => {
   lastArticleSnapshot = null;
   lastSummaryText = "";
   lastNoteTitle = "";
+  lastOriginalSummary = "";
+  originalSummaryPromise = null;
 }, 1000);
 
 initAutoOpenPanel();
@@ -224,6 +268,8 @@ async function translatePage(settings) {
   lastArticleSnapshot = createArticleSnapshot(allBlocks);
   lastSummaryText = "";
   lastNoteTitle = "";
+  lastOriginalSummary = "";
+  originalSummaryPromise = null;
 
   const style = settings.translationStyle || "bar";
 
@@ -715,6 +761,7 @@ function getPageBundle() {
     sourceType: isXPage() ? "x" : "web",
     capturedAt: snapshot.capturedAt,
     summary: getAskMarkdown(document.querySelector(`.${ASK_PANEL_CLASS}`)) || lastSummaryText,
+    originalSummary: lastOriginalSummary,
     blocks
   };
 }
@@ -777,6 +824,7 @@ function getAskMarkdown(panel) {
 function openAskPanel(settings = {}, options = {}) {
   const resolvedSettings = { ...DEFAULT_OLLAMA, ...lastKnownSettings, ...settings };
   lastKnownSettings = resolvedSettings;
+  const shouldShow = options.visible !== false;
   let panel = document.querySelector(`.${ASK_PANEL_CLASS}`);
   if (panel) {
     if (panel.dataset.pageUrl !== location.href) {
@@ -784,13 +832,14 @@ function openAskPanel(settings = {}, options = {}) {
       panel = null;
     } else {
       applyExternalSettingsToPanel(panel, resolvedSettings);
-      panel.hidden = false;
+      if (shouldShow) panel.hidden = false;
       return panel;
     }
   }
 
   panel = document.createElement("aside");
   panel.className = ASK_PANEL_CLASS;
+  panel.hidden = !shouldShow;
   panel.dataset.pageUrl = location.href;
   panel.__pitSettings = resolvedSettings;
   panel.innerHTML = [
@@ -804,7 +853,7 @@ function openAskPanel(settings = {}, options = {}) {
     '<button class="pit-reader-tab is-active" data-reader-tab="translate" type="button">🌐 翻译</button>',
     '<button class="pit-reader-tab" data-reader-tab="ask" type="button">💬 Ask</button>',
     '<button class="pit-reader-tab" data-reader-tab="tweet" type="button">✍️ 发帖</button>',
-    '<button class="pit-reader-tab" data-reader-tab="notes" type="button">📝 笔记</button>',
+    '<button class="pit-reader-tab" data-reader-tab="notes" type="button">✎ 笔记</button>',
     '<button class="pit-reader-tab" data-reader-tab="settings" type="button">⚙️ 设置</button>',
     '</nav>',
     '<section class="pit-reader-body">',
@@ -836,12 +885,11 @@ function openAskPanel(settings = {}, options = {}) {
     '<label class="pit-reader-field pit-reader-range-field"><span>译文字号 <strong class="pit-font-size-value">100%</strong></span><input class="pit-panel-font-size" type="range" min="80" max="130" step="1"></label>',
     '<label class="pit-reader-field pit-reader-range-field"><span>译文行距 <strong class="pit-line-height-value">1.4</strong></span><input class="pit-panel-line-height" type="range" min="1.1" max="1.9" step="0.05"></label>',
     '<label class="pit-reader-field"><span>标记样式</span><select class="pit-panel-mark-style"><option value="highlight">高亮 ==文字==</option><option value="bold">加粗 **文字**</option><option value="italic">斜体 *文字*</option><option value="boldItalic">加粗斜体 ***文字***</option><option value="code">代码 `文字`</option></select></label>',
-    '<label class="pit-reader-field"><span>浮动笔记保存</span><select class="pit-panel-note-shortcut"><option value="enter">Enter</option><option value="cmdEnter">Cmd/Ctrl + Enter</option></select></label>',
     '<div class="pit-reader-color-grid">',
     '<label class="pit-reader-field"><span>浅色网页标记色</span><input class="pit-panel-mark-color-light" type="color"></label>',
     '<label class="pit-reader-field"><span>深色网页标记色</span><input class="pit-panel-mark-color-dark" type="color"></label>',
     '</div>',
-    '<label class="pit-reader-toggle"><input class="pit-panel-auto-open" type="checkbox"> 打开网页后自动显示操作面板</label>',
+    '<label class="pit-reader-toggle"><input class="pit-panel-auto-open" type="checkbox"> 打开网页后自动显示面板</label>',
     '<label class="pit-reader-field"><span>Markdown 保存目录</span><input class="pit-panel-save-dir" placeholder="WebNotes"><small class="pit-reader-help">只能填写 Chrome 下载目录下的子文件夹，例如 WebNotes，不能填写 /Users/... 绝对路径。</small></label>',
     '</div>',
     '</section>',
@@ -888,7 +936,6 @@ function hydrateReaderPanel(panel, settings) {
   panel.querySelector(".pit-panel-font-size").value = normalizeFontSizePercent(initial.translationFontSize);
   panel.querySelector(".pit-panel-line-height").value = normalizeLineHeight(initial.translationLineHeight);
   panel.querySelector(".pit-panel-mark-style").value = initial.markStyle || DEFAULT_OLLAMA.markStyle;
-  panel.querySelector(".pit-panel-note-shortcut").value = initial.noteSaveShortcut || DEFAULT_OLLAMA.noteSaveShortcut;
   panel.querySelector(".pit-panel-mark-color-light").value = getStoredMarkColor(initial, "light");
   panel.querySelector(".pit-panel-mark-color-dark").value = getStoredMarkColor(initial, "dark");
   panel.querySelector(".pit-panel-auto-open").checked = initial.autoOpenPanel !== false;
@@ -935,7 +982,6 @@ function hydrateReaderPanel(panel, settings) {
     ".pit-panel-font-size",
     ".pit-panel-line-height",
     ".pit-panel-mark-style",
-    ".pit-panel-note-shortcut",
     ".pit-panel-mark-color-light",
     ".pit-panel-mark-color-dark",
     ".pit-panel-auto-open",
@@ -1002,7 +1048,6 @@ function applyExternalSettingsToPanel(panel, settings = {}) {
     [".pit-panel-font-size", normalizeFontSizePercent(next.translationFontSize)],
     [".pit-panel-line-height", normalizeLineHeight(next.translationLineHeight)],
     [".pit-panel-mark-style", next.markStyle || DEFAULT_OLLAMA.markStyle],
-    [".pit-panel-note-shortcut", normalizeNoteSaveShortcut(next.noteSaveShortcut)],
     [".pit-panel-mark-color-light", getStoredMarkColor(next, "light")],
     [".pit-panel-mark-color-dark", getStoredMarkColor(next, "dark")],
     [".pit-panel-save-dir", next.saveDir || "page-notes"]
@@ -1091,7 +1136,7 @@ function readPanelSettings(panel) {
     markStyle: panel.querySelector(".pit-panel-mark-style")?.value || DEFAULT_OLLAMA.markStyle,
     markHighlightColorLight: normalizeColor(panel.querySelector(".pit-panel-mark-color-light")?.value, DEFAULT_OLLAMA.markHighlightColorLight),
     markHighlightColorDark: normalizeColor(panel.querySelector(".pit-panel-mark-color-dark")?.value, DEFAULT_OLLAMA.markHighlightColorDark),
-    noteSaveShortcut: normalizeNoteSaveShortcut(panel.querySelector(".pit-panel-note-shortcut")?.value),
+    noteSaveShortcut: "auto",
     provider,
     model: selectedModel?.trim() || DEFAULT_OLLAMA.model,
     baseUrl: panel.querySelector(".pit-panel-base-url")?.value.trim() || DEFAULT_OLLAMA.baseUrl,
@@ -1277,12 +1322,15 @@ async function saveAskMarkdown(panel) {
 
 async function savePanelMarkdown(panel) {
   panel.dataset.savingNote = "true";
-  setPanelStatus(panel, "正在保存...");
+  const isVisiblePanel = panel.hidden !== true;
+  if (isVisiblePanel) setPanelStatus(panel, "正在保存...");
   try {
     const settings = readPanelSettings(panel);
     if (isAbsoluteSavePath(settings.saveDir)) {
-      setPanelStatus(panel, "保存目录只能填下载目录下的子文件夹，例如 WebNotes。");
-      focusWithoutPageScroll(panel.querySelector(".pit-panel-save-dir"));
+      if (isVisiblePanel) {
+        setPanelStatus(panel, "保存目录只能填下载目录下的子文件夹，例如 WebNotes。");
+        focusWithoutPageScroll(panel.querySelector(".pit-panel-save-dir"));
+      }
       return;
     }
     const response = await sendRuntimeMessageWithTimeout({
@@ -1304,9 +1352,9 @@ async function savePanelMarkdown(panel) {
     }, 30000, "保存超时，请稍后重试。");
     if (!response?.ok) throw new Error(response?.error || "保存失败。");
     clearNoteDraft(panel);
-    setPanelStatus(panel, `已保存：${response.filename}`);
+    if (isVisiblePanel) setPanelStatus(panel, `已保存：${response.filename}`);
   } catch (error) {
-    setPanelStatus(panel, humanizeRuntimeError(error));
+    if (isVisiblePanel) setPanelStatus(panel, humanizeRuntimeError(error));
   } finally {
     panel.dataset.savingNote = "false";
   }
@@ -1561,7 +1609,7 @@ async function runReaderActionFromMessage(message) {
   const action = message?.action;
   const settings = { ...DEFAULT_OLLAMA, ...(message?.settings || {}) };
   const selectedText = normalizeSelectedText(message?.selectionText || window.getSelection()?.toString() || "");
-  const panel = openAskPanel(settings, { focus: false });
+  const panel = openAskPanel(settings, { focus: false, visible: false });
 
   if (action === "translate_current_page") {
     activateReaderTab(panel, "translate");
@@ -1753,6 +1801,7 @@ function handleHoverNotePointerOver(event) {
   const composerUnderPointer = event.target?.closest?.(".pit-mark-note-composer");
   if (composerUnderPointer) {
     cancelHoverNoteHide();
+    activateHoverNoteHotZone(composerUnderPointer);
     return;
   }
   const target = getHoverNoteTarget(event.target);
@@ -1768,7 +1817,8 @@ function handleHoverNotePointerOver(event) {
     hoverNoteTarget = target;
     hoverNoteComposer = savedComposer;
     savedComposer.classList.add("is-target-hovered");
-    savedComposer.classList.remove("is-closed", "is-hiding");
+    savedComposer.classList.remove("is-hiding");
+    savedComposer.classList.toggle("is-open", !savedComposer.classList.contains("is-closed"));
     savedComposer.hidden = false;
     savedComposer.classList.add("is-visible");
     positionHoverNoteComposer(savedComposer, target);
@@ -1779,7 +1829,7 @@ function handleHoverNotePointerOver(event) {
     positionHoverNoteComposer(hoverNoteComposer, target);
     return;
   }
-  if (hoverNoteComposer?.matches(":focus-within") || normalizeSelectedText(hoverNoteComposer?.querySelector(".pit-mark-note-input")?.value || "")) {
+  if (hoverNoteComposer?.matches(":focus-within") || normalizeHoverNoteMarkdown(hoverNoteComposer?.querySelector(".pit-mark-note-input")?.value || "")) {
     return;
   }
   scheduleHoverNoteShow(target);
@@ -1793,8 +1843,11 @@ function handleHoverNotePointerOut(event) {
   const nextTarget = getHoverNoteTarget(next);
   if (fromTarget && nextTarget === fromTarget) return;
   const composer = fromTarget ? hoverNoteComposers.get(fromTarget) : hoverNoteComposer;
+  if (next?.closest?.(".pit-mark-note-composer")) {
+    composer?.classList.add("is-target-hovered");
+    return;
+  }
   composer?.classList.remove("is-target-hovered");
-  if (next?.closest?.(".pit-mark-note-composer")) return;
   cancelHoverNoteShow();
   scheduleHoverNoteHide();
 }
@@ -1847,20 +1900,28 @@ function showHoverNoteComposer(target) {
   }
   hoverNoteTarget = target;
   hoverNoteComposer = hoverNoteComposers.get(target);
+  let created = false;
   if (!hoverNoteComposer?.isConnected) {
     const composer = createHoverNoteComposer(target);
     hoverNoteComposer = composer;
+    created = true;
     hoverNoteComposers.set(target, composer);
     hoverNoteResizeObserver?.observe(target);
+    hoverNoteResizeObserver?.observe(composer);
     document.body.appendChild(composer);
   }
   if (!hoverNoteComposer.dataset.savedNote
-    && !normalizeSelectedText(hoverNoteComposer.querySelector(".pit-mark-note-input")?.value || "")) {
+    && !normalizeHoverNoteMarkdown(hoverNoteComposer.querySelector(".pit-mark-note-input")?.value || "")) {
     hoverNoteComposer.dataset.selectedText = getSelectedTextForNoteTarget(target);
   }
   hoverNoteComposer.hidden = false;
   hoverNoteComposer.classList.remove("is-visible", "is-hiding");
+  if (created) hoverNoteComposer.classList.remove("is-closed");
   hoverNoteComposer.classList.add("is-target-hovered");
+  const isClosed = hoverNoteComposer.classList.contains("is-closed");
+  hoverNoteComposer.classList.toggle("is-open", !isClosed);
+  hoverNoteComposer.querySelector(".pit-mark-note-label")?.setAttribute("aria-expanded", String(!isClosed));
+  hoverNoteComposer.querySelector(".pit-mark-note-label")?.setAttribute("aria-label", isClosed ? "添加笔记" : "关闭笔记");
   const composer = hoverNoteComposer;
   requestAnimationFrame(() => composer.classList.add("is-visible"));
   positionHoverNoteComposer(hoverNoteComposer, target);
@@ -1894,63 +1955,73 @@ function createHoverNoteComposer(target, settings = undefined) {
   label.className = "pit-mark-note-label";
   label.type = "button";
   label.setAttribute("aria-label", "添加笔记");
+  label.setAttribute("aria-expanded", "false");
 
   const field = document.createElement("div");
   field.className = "pit-mark-note-field";
 
-  const fieldHeader = document.createElement("div");
-  fieldHeader.className = "pit-mark-note-header";
-
-  const dragHandle = document.createElement("span");
-  dragHandle.className = "pit-mark-note-drag-handle";
-  dragHandle.textContent = "笔记";
-
-  const closeButton = document.createElement("button");
-  closeButton.className = "pit-mark-note-close";
-  closeButton.type = "button";
-  closeButton.textContent = "关闭";
-  closeButton.setAttribute("aria-label", "收起笔记条");
+  const noteIcon = document.createElement("span");
+  noteIcon.className = "pit-mark-note-icon";
+  noteIcon.setAttribute("aria-hidden", "true");
+  noteIcon.innerHTML = [
+    '<svg viewBox="0 0 24 24" focusable="false">',
+    '<path d="M4 20h4.25L19.6 8.65a2.35 2.35 0 0 0-3.32-3.32L4.93 16.68 4 20z"></path>',
+    '<path d="M14.75 6.85l2.4 2.4M4 20h16"></path>',
+    "</svg>"
+  ].join("");
 
   const input = document.createElement("textarea");
   input.className = "pit-mark-note-input";
   input.rows = 1;
-  input.placeholder = "写一点笔记";
+  setHoverNotePrompt(input);
   input.setAttribute("aria-label", "笔记");
 
-  const shortcutHint = document.createElement("span");
-  shortcutHint.className = "pit-mark-note-shortcut";
-  shortcutHint.setAttribute("aria-hidden", "true");
-
-  fieldHeader.append(dragHandle, closeButton);
-  field.append(fieldHeader, input, shortcutHint);
+  field.append(noteIcon, input);
   composer.append(label, field);
 
   const submit = () => submitHoverNote(composer, settings);
-  const updateShortcutHint = () => {
-    const shortcut = normalizeNoteSaveShortcut(getLiveMarkedNoteSettings(settings).noteSaveShortcut);
-    shortcutHint.textContent = shortcut === "enter" ? "⏎" : "Cmd + ⏎";
+  const openFromHotZone = () => {
+    hoverNoteTarget = target;
+    hoverNoteComposer = composer;
+    ensureHoverNoteDefaultPrefix(input);
+    composer.hidden = false;
+    composer.classList.add("is-visible", "is-target-hovered", "is-hot", "is-open");
+    composer.classList.remove("is-closed", "is-hiding");
+    label.setAttribute("aria-expanded", "true");
+    label.setAttribute("aria-label", "关闭笔记");
+    autosizeMarkedNoteInput(input);
+    positionHoverNoteComposer(composer, target);
   };
   input.addEventListener("keydown", (event) => {
-    if (shouldSaveMarkedNoteOnKeydown(event, getLiveMarkedNoteSettings(settings))) {
+    primeHoverNoteInputForTyping(input, event);
+    if (event.key === "Enter" && !event.shiftKey && !event.altKey && !event.isComposing) {
       event.preventDefault();
-      submit();
+      insertTextareaListBreak(input);
     }
   });
+  input.addEventListener("paste", () => clearHoverNotePrompt(input));
   input.addEventListener("input", () => {
-    const hasContent = Boolean(normalizeSelectedText(input.value));
+    input.classList.toggle("is-prompt", input.value === HOVER_NOTE_PROMPT);
+    const hasContent = Boolean(normalizeHoverNoteMarkdown(input.value));
     composer.classList.toggle("is-writing", hasContent);
     composer.classList.toggle("has-content", hasContent);
-    if (hasContent) composer.classList.remove("is-closed");
+    if (hasContent) {
+      composer.classList.remove("is-closed");
+      composer.classList.add("is-open");
+      label.setAttribute("aria-expanded", "true");
+    }
     autosizeMarkedNoteInput(input);
   });
   input.addEventListener("focus", () => {
-    updateShortcutHint();
+    ensureHoverNoteDefaultPrefix(input);
     autosizeMarkedNoteInput(input);
   });
   input.addEventListener("blur", () => {
-    if (!normalizeSelectedText(input.value)) composer.classList.remove("is-writing");
+    if (!normalizeHoverNoteMarkdown(input.value)) composer.classList.remove("is-writing");
     autosizeMarkedNoteInput(input);
-    if (!normalizeSelectedText(input.value) && !composer.dataset.savedNote) {
+    if (normalizeHoverNoteMarkdown(input.value)) {
+      dismissHoverNoteComposer(composer, settings);
+    } else if (!composer.dataset.savedNote) {
       scheduleHoverNoteHide();
     }
   });
@@ -1958,38 +2029,69 @@ function createHoverNoteComposer(target, settings = undefined) {
   const openNoteField = () => {
     hoverNoteTarget = target;
     hoverNoteComposer = composer;
+    ensureHoverNoteDefaultPrefix(input);
     composer.hidden = false;
     composer.classList.add("is-visible", "is-target-hovered");
     composer.classList.remove("is-closed");
+    composer.classList.add("is-open");
+    label.setAttribute("aria-expanded", "true");
+    label.setAttribute("aria-label", "关闭笔记");
     focusWithoutPageScroll(input);
     autosizeMarkedNoteInput(input);
   };
-  label.addEventListener("focus", openNoteField);
-  label.addEventListener("click", openNoteField);
-  closeButton.addEventListener("click", (event) => {
+
+  const closeNoteField = () => {
+    const hasContent = Boolean(normalizeHoverNoteMarkdown(input.value) || composer.dataset.savedNote);
+    composer.classList.toggle("has-content", hasContent);
+    composer.classList.add("is-closed");
+    composer.classList.remove("is-hot", "is-open");
+    composer.classList.remove("is-writing");
+    label.setAttribute("aria-expanded", "false");
+    label.setAttribute("aria-label", "添加笔记");
+    input.blur();
+  };
+
+  label.addEventListener("click", (event) => {
     event.preventDefault();
     event.stopPropagation();
-    composer.classList.add("is-closed");
-    composer.classList.remove("is-writing");
-    input.blur();
+    if (composer.classList.contains("is-closed")) {
+      openNoteField();
+    } else {
+      closeNoteField();
+    }
   });
-  enableHoverNoteDragging(composer, field, dragHandle);
   composer.addEventListener("mouseenter", () => {
     cancelHoverNoteHide();
+    openFromHotZone();
     autosizeMarkedNoteInput(input);
   });
   composer.addEventListener("mouseleave", () => {
     if (composer.classList.contains("is-dragging")) return;
-    dismissHoverNoteComposer(composer);
+    dismissHoverNoteComposer(composer, settings);
   });
   composer.addEventListener("focusin", () => {
     cancelHoverNoteHide();
     autosizeMarkedNoteInput(input);
   });
 
-  updateShortcutHint();
   autosizeMarkedNoteInput(input);
   return composer;
+}
+
+function activateHoverNoteHotZone(composer) {
+  if (!(composer instanceof HTMLElement)) return;
+  const target = findHoverNoteTargetForComposer(composer);
+  if (!(target instanceof HTMLElement)) return;
+  hoverNoteTarget = target;
+  hoverNoteComposer = composer;
+  composer.hidden = false;
+  composer.classList.add("is-visible", "is-target-hovered", "is-hot", "is-open");
+  composer.classList.remove("is-closed", "is-hiding");
+  const label = composer.querySelector(".pit-mark-note-label");
+  label?.setAttribute("aria-expanded", "true");
+  label?.setAttribute("aria-label", "关闭笔记");
+  cancelHoverNoteHide();
+  positionHoverNoteComposer(composer, target);
 }
 
 function scheduleHoverNoteHide() {
@@ -2000,30 +2102,24 @@ function scheduleHoverNoteHide() {
   }, 650);
 }
 
-function dismissHoverNoteComposer(composer) {
+function dismissHoverNoteComposer(composer, settings = undefined) {
   if (!(composer instanceof HTMLElement)) return;
   cancelHoverNoteHide();
+  const label = composer.querySelector(".pit-mark-note-label");
+  const input = composer.querySelector(".pit-mark-note-input");
   const hasSavedNote = Boolean(composer.dataset.savedNote);
-  const hasDraft = Boolean(normalizeSelectedText(composer.querySelector(".pit-mark-note-input")?.value || ""));
-  if (hasSavedNote) {
-    composer.querySelector(".pit-mark-note-input")?.blur();
-    composer.classList.remove("is-writing");
-    if (hoverNoteComposer === composer) {
-      hoverNoteComposer = null;
-      hoverNoteTarget = null;
-    }
-    return;
-  }
-  if (hasDraft) {
-    composer.querySelector(".pit-mark-note-input")?.blur();
+  const draft = normalizeHoverNoteMarkdown(input?.value || "");
+  const hasDraft = Boolean(draft);
+  composer.classList.remove("is-target-hovered", "is-hot", "is-open", "is-writing");
+  composer.classList.add("is-closed");
+  label?.setAttribute("aria-expanded", "false");
+  label?.setAttribute("aria-label", "添加笔记");
+  if (hasDraft && draft !== composer.dataset.savedNote) {
+    submitHoverNote(composer, settings);
+  } else if (hasSavedNote || hasDraft) {
+    input?.blur();
     composer.classList.add("has-content");
-    if (hoverNoteComposer === composer) {
-      hoverNoteComposer = null;
-      hoverNoteTarget = null;
-    }
-    return;
   }
-  composer.classList.remove("is-writing");
   if (hoverNoteComposer === composer) {
     hoverNoteComposer = null;
     hoverNoteTarget = null;
@@ -2071,10 +2167,11 @@ function syncMarkedNotesForCurrentUrl() {
   });
 }
 
-function submitHoverNote(composer, settings = undefined) {
+async function submitHoverNote(composer, settings = undefined) {
   if (!(composer instanceof HTMLElement)) return;
+  if (composer.dataset.submittingNote === "true") return;
   const input = composer.querySelector(".pit-mark-note-input");
-  const note = normalizeSelectedText(input?.value || "");
+  const note = normalizeHoverNoteMarkdown(input?.value || "");
   if (!note) {
     composer.classList.add("is-empty");
     setTimeout(() => composer.classList.remove("is-empty"), 900);
@@ -2082,18 +2179,27 @@ function submitHoverNote(composer, settings = undefined) {
     return;
   }
 
-  const oldNote = composer.dataset.savedNote || "";
-  const notePanelTarget = appendHoverNoteToPanel(note, composer.dataset.selectedText || "", settings, oldNote);
-  if (!notePanelTarget) return;
-  composer.classList.remove("is-empty");
-  composer.classList.add("has-note", "has-content", "is-sent");
-  composer.classList.remove("is-closed");
-  composer.dataset.savedNote = note;
-  composer.classList.remove("is-writing");
-  autosizeMarkedNoteInput(input);
-  const anchorTarget = findHoverNoteTargetForComposer(composer);
-  if (anchorTarget) positionHoverNoteComposer(composer, anchorTarget);
-  setTimeout(() => composer.classList.remove("is-sent"), 900);
+  try {
+    composer.dataset.submittingNote = "true";
+    const oldNote = composer.dataset.savedNote || "";
+    const notePanelTarget = appendHoverNoteToPanel(note, composer.dataset.selectedText || "", settings, oldNote);
+    if (!notePanelTarget) throw new Error("无法打开笔记面板。");
+    composer.classList.remove("is-empty");
+    composer.classList.add("has-note", "has-content", "is-sent");
+    composer.classList.remove("is-closed");
+    composer.classList.add("is-open");
+    composer.querySelector(".pit-mark-note-label")?.setAttribute("aria-expanded", "true");
+    composer.dataset.savedNote = note;
+    composer.classList.remove("is-writing");
+    autosizeMarkedNoteInput(input);
+    const anchorTarget = findHoverNoteTargetForComposer(composer);
+    if (anchorTarget) positionHoverNoteComposer(composer, anchorTarget);
+    setTimeout(() => composer.classList.remove("is-sent"), 900);
+  } catch (error) {
+    console.warn("[PIT] failed to append hover note", error);
+  } finally {
+    delete composer.dataset.submittingNote;
+  }
 }
 
 function autosizeMarkedNoteInput(input) {
@@ -2103,13 +2209,48 @@ function autosizeMarkedNoteInput(input) {
   const nextHeight = Math.min(maxHeight, Math.max(30, input.scrollHeight));
   input.style.height = `${nextHeight}px`;
   input.style.overflowY = input.scrollHeight > maxHeight ? "auto" : "hidden";
+  scheduleHoverNotePositionSync();
 }
 
-function shouldSaveMarkedNoteOnKeydown(event, settings = {}) {
-  if (event.key !== "Enter" || event.isComposing) return false;
-  const shortcut = normalizeNoteSaveShortcut(settings.noteSaveShortcut);
-  if (shortcut === "enter") return !event.shiftKey && !event.metaKey && !event.ctrlKey && !event.altKey;
-  return (event.metaKey || event.ctrlKey) && !event.shiftKey && !event.altKey;
+function insertTextareaListBreak(input) {
+  if (!(input instanceof HTMLTextAreaElement)) return;
+  const start = input.selectionStart ?? input.value.length;
+  const end = input.selectionEnd ?? start;
+  const insertion = "\n- ";
+  input.value = `${input.value.slice(0, start)}${insertion}${input.value.slice(end)}`;
+  input.selectionStart = input.selectionEnd = start + insertion.length;
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
+function ensureHoverNoteDefaultPrefix(input) {
+  if (!(input instanceof HTMLTextAreaElement)) return;
+  if (input.value) return;
+  setHoverNotePrompt(input);
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
+function setHoverNotePrompt(input) {
+  if (!(input instanceof HTMLTextAreaElement)) return;
+  input.value = HOVER_NOTE_PROMPT;
+  input.classList.add("is-prompt");
+  input.selectionStart = input.selectionEnd = 2;
+}
+
+function clearHoverNotePrompt(input) {
+  if (!(input instanceof HTMLTextAreaElement) || input.value !== HOVER_NOTE_PROMPT) return;
+  input.value = "- ";
+  input.classList.remove("is-prompt");
+  input.selectionStart = input.selectionEnd = input.value.length;
+}
+
+function primeHoverNoteInputForTyping(input, event) {
+  if (!(input instanceof HTMLTextAreaElement) || input.value !== HOVER_NOTE_PROMPT) return;
+  const keepsPrompt = [
+    "Tab", "Shift", "Control", "Alt", "Meta", "Escape",
+    "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End"
+  ].includes(event.key);
+  if (keepsPrompt || event.metaKey || event.ctrlKey || event.altKey) return;
+  clearHoverNotePrompt(input);
 }
 
 function getLiveMarkedNoteSettings(fallbackSettings = {}) {
@@ -2123,6 +2264,7 @@ function getLiveMarkedNoteSettings(fallbackSettings = {}) {
 function positionHoverNoteComposer(composer, target) {
   if (!(composer instanceof HTMLElement) || !(target instanceof HTMLElement)) return;
   if (!target.isConnected) {
+    hoverNoteResizeObserver?.unobserve(composer);
     composer.remove();
     hoverNoteResizeObserver?.unobserve(target);
     hoverNoteComposers.delete(target);
@@ -2142,17 +2284,34 @@ function positionHoverNoteComposer(composer, target) {
     delete composer.dataset.viewportHidden;
     composer.hidden = false;
   }
-  const buttonSize = composer.classList.contains("has-note") ? 24 : 18;
+  const buttonSize = 18;
   const gap = 8;
   const left = Math.min(window.innerWidth - buttonSize - 8, Math.max(8, rect.right + gap));
   const paragraphCenter = rect.top + rect.height / 2;
-  const top = Math.min(
-    window.innerHeight - buttonSize - 8,
-    Math.max(8, paragraphCenter - buttonSize / 2)
-  );
+  let top = Math.min(window.innerHeight - buttonSize - 8, Math.max(8, paragraphCenter - buttonSize / 2));
   const noteWidth = Math.min(310, window.innerWidth - 32);
   const spaceRight = window.innerWidth - (left + buttonSize + gap);
-  composer.classList.toggle("opens-below", spaceRight < noteWidth);
+  const opensBelow = spaceRight < noteWidth;
+  composer.classList.toggle("opens-below", opensBelow);
+
+  const field = composer.querySelector(".pit-mark-note-field");
+  const fieldHeight = Math.min(
+    Math.max(field?.offsetHeight || composer.querySelector(".pit-mark-note-input")?.scrollHeight || 30, 30),
+    Math.min(340, Math.floor(window.innerHeight * 0.48))
+  );
+  const viewportGap = 8;
+
+  if (opensBelow) {
+    const spaceBelow = window.innerHeight - (top + buttonSize + gap) - viewportGap;
+    const spaceAbove = top - gap - viewportGap;
+    composer.classList.toggle("opens-above", fieldHeight > spaceBelow && spaceAbove >= spaceBelow);
+  } else {
+    composer.classList.remove("opens-above");
+    const minTop = viewportGap + fieldHeight / 2 - buttonSize / 2;
+    const maxTop = window.innerHeight - viewportGap - fieldHeight / 2 - buttonSize / 2;
+    top = Math.min(Math.max(minTop, top), Math.max(minTop, maxTop));
+  }
+
   composer.style.left = `${Math.round(left)}px`;
   composer.style.top = `${Math.round(top)}px`;
 }
@@ -2180,7 +2339,7 @@ function enableHoverNoteDragging(composer, field, handle) {
     drag = null;
     composer.classList.remove("is-dragging");
     composer.classList.add("is-visible");
-    if (normalizeSelectedText(composer.querySelector(".pit-mark-note-input")?.value || "")) {
+    if (normalizeHoverNoteMarkdown(composer.querySelector(".pit-mark-note-input")?.value || "")) {
       composer.classList.add("has-content");
     }
     handle.releasePointerCapture?.(event.pointerId);
@@ -2205,6 +2364,7 @@ function enableHoverNoteDragging(composer, field, handle) {
     };
     composer.classList.add("is-dragged", "is-dragging");
     composer.classList.remove("is-closed");
+    composer.classList.add("is-open");
     composer.style.setProperty("--pit-note-drag-left", `${Math.round(rect.left)}px`);
     composer.style.setProperty("--pit-note-drag-top", `${Math.round(rect.top)}px`);
     handle.setPointerCapture?.(event.pointerId);
@@ -2220,6 +2380,7 @@ function scheduleHoverNotePositionSync() {
     hoverNotePositionFrame = 0;
     hoverNoteComposers.forEach((composer, target) => {
       if (!composer.isConnected || !target.isConnected) {
+        hoverNoteResizeObserver?.unobserve(composer);
         composer.remove();
         hoverNoteResizeObserver?.unobserve(target);
         hoverNoteComposers.delete(target);
@@ -2241,11 +2402,11 @@ function getSelectedTextForNoteTarget(target) {
 }
 
 function appendHoverNoteToPanel(note, selectedText, settings = undefined, oldNote = "") {
-  const value = normalizeSelectedText(note);
+  const value = normalizeUserNoteMarkdown(note);
   const selection = normalizeSelectedText(selectedText);
   if (!value) return null;
   const scrollPosition = capturePageScrollPosition();
-  const panel = openAskPanel(settings);
+  const panel = openAskPanel(settings, { focus: false, visible: false });
   activateReaderTab(panel, "notes");
   const input = panel.querySelector(".pit-panel-note");
   if (!input) return null;
@@ -2258,8 +2419,8 @@ function appendHoverNoteToPanel(note, selectedText, settings = undefined, oldNot
   input.scrollTop = input.scrollHeight;
   scrollNotesAreaToBottom(panel);
   persistNoteDraft(panel);
-  setPanelStatus(panel, selection ? "笔记和选中文字已发送，正在清洗重复内容..." : "笔记已发送，正在清洗重复内容...");
-  requestNoteCleaning(panel, settings);
+  prepareOriginalSummary(settings);
+  requestNoteCleaning(panel, settings, { silent: true });
   restorePageScrollPosition(scrollPosition);
   showPanelReceiveFeedback(panel, input);
   return { panel, input };
@@ -2270,26 +2431,70 @@ function insertHoverNote(markdown, selectedText, note, oldNote = "") {
   const selectionLine = selectedText
     ? `- 选中内容：${escapeMarkdownInline(selectedText).replace(/\n+/g, " / ")}`
     : "";
-  const notePrefix = selectionLine ? "  - 笔记：" : "- 笔记：";
-  const noteLine = `${notePrefix}${escapeMarkdownInline(note).replace(/\n+/g, " / ")}`;
-  const oldNoteLine = oldNote ? `${notePrefix}${escapeMarkdownInline(oldNote).replace(/\n+/g, " / ")}` : "";
+  const noteMarkdown = formatNoteMarkdownForInsertion(note);
+  const oldNoteMarkdown = oldNote ? formatNoteMarkdownForInsertion(oldNote) : "";
+  const legacyPrefix = selectionLine ? "  - 笔记：" : "- 笔记：";
+  const legacyOldNote = oldNote ? `${legacyPrefix}${escapeMarkdownInline(oldNote).replace(/\n+/g, " / ")}` : "";
 
-  if (oldNoteLine) {
+  if (oldNoteMarkdown) {
     const contextIndex = selectionLine ? source.lastIndexOf(selectionLine) : 0;
     const searchStart = contextIndex >= 0 ? contextIndex : 0;
-    const oldIndex = source.indexOf(oldNoteLine, searchStart);
-    const nextParentIndex = selectionLine ? source.indexOf("\n- ", searchStart + selectionLine.length) : -1;
-    if (oldIndex >= 0 && (nextParentIndex < 0 || oldIndex < nextParentIndex)) {
-      const markdownValue = `${source.slice(0, oldIndex)}${noteLine}${source.slice(oldIndex + oldNoteLine.length)}`;
-      return { markdown: markdownValue, cursor: oldIndex + noteLine.length };
+    let oldIndex = source.indexOf(oldNoteMarkdown, searchStart);
+    let oldLength = oldNoteMarkdown.length;
+    if (oldIndex < 0 && legacyOldNote) {
+      oldIndex = source.indexOf(legacyOldNote, searchStart);
+      oldLength = legacyOldNote.length;
+    }
+    if (oldIndex >= 0) {
+      const markdownValue = `${source.slice(0, oldIndex)}${noteMarkdown}${source.slice(oldIndex + oldLength)}`;
+      return { markdown: markdownValue, cursor: oldIndex + noteMarkdown.length };
     }
   }
 
   const prefix = source.trim() ? (source.endsWith("\n") ? "\n" : "\n\n") : "";
   const insertion = selectionLine
-    ? `${prefix}${selectionLine}\n${noteLine}\n`
-    : `${prefix}${noteLine}\n`;
+    ? `${prefix}${selectionLine}\n\n${noteMarkdown}\n`
+    : `${prefix}${noteMarkdown}\n`;
   return { markdown: `${source}${insertion}`, cursor: source.length + insertion.length };
+}
+
+function normalizeUserNoteMarkdown(markdown) {
+  return String(markdown || "")
+    .replace(/\r\n?/g, "\n")
+    .replace(/\u00A0/g, " ")
+    .split("\n")
+    .map((line) => line.replace(/[ \t]+$/g, ""))
+    .join("\n")
+    .replace(/^(#{1,6})([^\s#])/gm, "$1 $2")
+    .replace(/^(\s*)([-+*])([^\s])/gm, "$1$2 $3")
+    .replace(/^(\s*)(\d+[.)])([^\s])/gm, "$1$2 $3")
+    .replace(/^(\s*>)([^\s>])/gm, "$1 $2")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function normalizeHoverNoteMarkdown(markdown) {
+  const normalized = normalizeUserNoteMarkdown(markdown);
+  const source = normalized === HOVER_NOTE_PROMPT ? "- " : normalized;
+  return source
+    .split("\n")
+    .filter((line) => !/^\s*(?:[-+*]|\d+[.)])\s*$/.test(line))
+    .join("\n")
+    .trim();
+}
+
+function formatNoteMarkdownForInsertion(markdown) {
+  const normalized = normalizeUserNoteMarkdown(markdown);
+  if (!normalized) return "";
+  if (normalized.includes("\n") || hasMarkdownBlockSyntax(normalized)) {
+    return normalized;
+  }
+
+  return `- ${normalized}`;
+}
+
+function hasMarkdownBlockSyntax(markdown) {
+  return /^(?:\s{0,3}(?:[-+*]\s+|\d+[.)]\s+|#{1,6}\s+|>\s+|```|~~~)|\s{4}\S)/m.test(String(markdown || ""));
 }
 
 function formatMarkedTextMarkdown(text) {
@@ -2340,7 +2545,7 @@ function appendMarkdownLineToNote(markdown, settings = undefined, status = "已�
   const value = String(markdown || "").trim();
   if (!value) return null;
   const scrollPosition = capturePageScrollPosition();
-  const panel = openAskPanel(settings);
+  const panel = openAskPanel(settings, { focus: false, visible: false });
   activateReaderTab(panel, "notes");
   const input = panel.querySelector(".pit-panel-note");
   panel.dataset.appendingSelection = "true";
@@ -2355,8 +2560,8 @@ function appendMarkdownLineToNote(markdown, settings = undefined, status = "已�
   scrollNotesAreaToBottom(panel);
   focusWithoutPageScroll(input);
   persistNoteDraft(panel);
-  setPanelStatus(panel, status.replace(/草稿已自动保存。?$/, "正在清洗重复内容..."));
-  requestNoteCleaning(panel, settings);
+  prepareOriginalSummary(settings);
+  requestNoteCleaning(panel, settings, { silent: true });
   hideSelectionToolbar();
   restorePageScrollPosition(scrollPosition);
   return { panel, input };
@@ -2364,11 +2569,47 @@ function appendMarkdownLineToNote(markdown, settings = undefined, status = "已�
 
 const noteCleaningStates = new WeakMap();
 
-function requestNoteCleaning(panel, settings = undefined) {
+function prepareOriginalSummary(settings = undefined) {
+  if (lastOriginalSummary) return Promise.resolve(lastOriginalSummary);
+  if (originalSummaryPromise) return originalSummaryPromise;
+
+  const sourceUrl = location.href;
+  const page = getPageBundle();
+  const resolvedSettings = settings
+    ? { ...DEFAULT_OLLAMA, ...settings }
+    : { ...DEFAULT_OLLAMA, ...lastKnownSettings };
+  originalSummaryPromise = sendRuntimeMessageWithTimeout({
+    type: "BUILD_ORIGINAL_SUMMARY",
+    page,
+    settings: resolvedSettings
+  }, 22000, "原文总结生成超时。")
+    .then((response) => {
+      if (!response?.ok) throw new Error(response?.error || "原文总结生成失败。");
+      if (location.href !== sourceUrl) return "";
+      lastOriginalSummary = String(response.originalSummary || "").trim();
+      return lastOriginalSummary;
+    })
+    .catch((error) => {
+      console.warn("[PIT] original summary preparation failed", error);
+      return "";
+    })
+    .finally(() => {
+      originalSummaryPromise = null;
+    });
+  return originalSummaryPromise;
+}
+
+function requestNoteCleaning(panel, settings = undefined, options = {}) {
   if (!(panel instanceof HTMLElement)) return;
-  const state = noteCleaningStates.get(panel) || { running: false, pending: false, settings: undefined };
+  const state = noteCleaningStates.get(panel) || {
+    running: false,
+    pending: false,
+    settings: undefined,
+    silent: false
+  };
   state.pending = true;
   state.settings = settings;
+  state.silent = Boolean(options.silent);
   noteCleaningStates.set(panel, state);
   if (!state.running) runNoteCleaning(panel, state);
 }
@@ -2401,13 +2642,13 @@ async function runNoteCleaning(panel, state) {
         input.value = `${cleaned}\n`;
         input.selectionStart = input.selectionEnd = input.value.length;
         persistNoteDraft(panel);
-        setPanelStatus(panel, "笔记已清洗，重复内容已删除。");
+        if (!state.silent) setPanelStatus(panel, "笔记已清洗，重复内容已删除。");
       } else {
-        setPanelStatus(panel, "笔记已检查，没有发现重复内容。");
+        if (!state.silent) setPanelStatus(panel, "笔记已检查，没有发现重复内容。");
       }
     }
   } catch (error) {
-    setPanelStatus(panel, `${humanizeRuntimeError(error)} 原始笔记已保留。`);
+    if (!state.silent) setPanelStatus(panel, `${humanizeRuntimeError(error)} 原始笔记已保留。`);
   } finally {
     state.running = false;
     if (state.pending && panel.isConnected) runNoteCleaning(panel, state);
@@ -2499,7 +2740,7 @@ function persistPanelSettings(settings) {
     markHighlightColor: settings.markHighlightColor,
     markHighlightColorLight: settings.markHighlightColorLight,
     markHighlightColorDark: settings.markHighlightColorDark,
-    noteSaveShortcut: normalizeNoteSaveShortcut(settings.noteSaveShortcut),
+    noteSaveShortcut: "auto",
     model: settings.model,
     baseUrl: settings.baseUrl,
     apiKey: settings.apiKey,
@@ -2589,6 +2830,7 @@ async function restoreNoteDraft(panel) {
     const draft = keys.map((key) => stored[key]).find(Boolean);
     if (draft && !input.value) {
       input.value = draft;
+      updateUnsavedNotePrompt(true);
       setPanelStatus(panel, "已恢复未保存的笔记草稿。");
     }
   } catch {
@@ -2599,6 +2841,7 @@ async function restoreNoteDraft(panel) {
 function persistNoteDraft(panel) {
   const note = getNoteMarkdown(panel);
   const entries = Object.fromEntries(getNoteDraftKeys().map((key) => [key, note]));
+  updateUnsavedNotePrompt(Boolean(note.trim()));
   if (!chrome.storage?.local?.set) return;
   chrome.storage.local.set(entries).catch(() => {
     // 自动草稿失败时不打断编辑。
@@ -2613,6 +2856,59 @@ function clearNoteDraft(panel) {
   if (render) {
     render.hidden = true;
     render.innerHTML = "";
+  }
+  updateUnsavedNotePrompt(false);
+}
+
+function updateUnsavedNotePrompt(visible) {
+  let prompt = document.querySelector(".pit-unsaved-note-prompt");
+  if (!visible) {
+    prompt?.remove();
+    return;
+  }
+  if (!prompt) {
+    prompt = document.createElement("div");
+    prompt.className = "pit-unsaved-note-prompt";
+    prompt.innerHTML = [
+      '<div class="pit-unsaved-note-copy"><span>笔记尚未保存</span><small hidden></small></div>',
+      '<button type="button">保存</button>'
+    ].join("");
+    prompt.querySelector("button")?.addEventListener("click", async () => {
+      const button = prompt.querySelector("button");
+      button.disabled = true;
+      button.textContent = "保存中";
+      try {
+        const settings = await getCurrentPanelSettings();
+        const panel = openAskPanel(settings, { focus: false, visible: false });
+        await savePanelMarkdown(panel);
+      } finally {
+        if (prompt.isConnected) {
+          button.disabled = false;
+          button.textContent = "保存";
+        }
+      }
+    });
+    document.body.appendChild(prompt);
+    updateUnsavedNoteShortcutHint(prompt);
+  }
+}
+
+async function updateUnsavedNoteShortcutHint(prompt) {
+  const hint = prompt?.querySelector?.(".pit-unsaved-note-copy small");
+  if (!(hint instanceof HTMLElement)) return;
+  hint.hidden = true;
+  hint.textContent = "";
+  try {
+    const response = await safeRuntimeMessage({
+      type: "GET_COMMAND_SHORTCUT",
+      command: "save_page"
+    });
+    const shortcut = String(response?.shortcut || "").trim();
+    if (!response?.ok || !shortcut || !prompt.isConnected) return;
+    hint.textContent = `快捷键：${shortcut}`;
+    hint.hidden = false;
+  } catch {
+    // 读取不到实时快捷键时不展示提示。
   }
 }
 
@@ -3263,21 +3559,57 @@ function collectBlocks() {
 }
 
 function collectBundleBlocks() {
+  const contentRoot = findBestArticleContentRoot() || document.body;
+  if (!contentRoot) return [];
   const seen = new Set();
-  const candidates = Array.from(document.querySelectorAll(BLOCK_SELECTOR))
+  const candidates = Array.from(contentRoot.querySelectorAll(BLOCK_SELECTOR))
     .filter((el) => {
       if (seen.has(el)) return false;
       seen.add(el);
       return isBundleCandidateBlock(el);
     });
 
-  return removeOverlappingCandidateBlocks(addCoverageFallbackBlock(addVisibleTextFallbackCandidates(candidates)))
+  if (contentRoot.matches?.(BLOCK_SELECTOR) && isBundleCandidateBlock(contentRoot)) {
+    candidates.unshift(contentRoot);
+  }
+
+  return removeOverlappingCandidateBlocks(candidates)
     .map((el) => {
       const text = extractOriginalTextForBundle(el);
       return { element: el, text, hasFormat: hasFormatting(el) };
     })
-    .filter((item) => shouldTranslateToSimplifiedChinese(item.text))
+    .filter((item) => item.text && item.text.length >= 8)
     .slice(0, MAX_BLOCKS_PER_RUN);
+}
+
+function findBestArticleContentRoot() {
+  if (isXPage()) {
+    return document.querySelector("main, [role='main']") || document.body;
+  }
+
+  const selectors = [
+    "article", "main article", "[role='article']",
+    "main", "[role='main']",
+    ".article-body", ".article-content", ".post-content", ".entry-content",
+    ".story-body", ".content-body", "#article", "#content"
+  ];
+  const candidates = Array.from(document.querySelectorAll(selectors.join(",")))
+    .filter((el, index, list) => list.indexOf(el) === index)
+    .filter((el) => el instanceof HTMLElement && isVisible(el) && !el.closest(CONTENT_NOISE_SELECTOR))
+    .map((el) => {
+      const text = normalizeText(extractOriginalTextForBundle(el));
+      const paragraphs = el.querySelectorAll("p, li, blockquote, h1, h2, h3").length;
+      const linkTextLength = Array.from(el.querySelectorAll("a"))
+        .reduce((sum, link) => sum + normalizeText(link.innerText || link.textContent).length, 0);
+      const linkRatio = text.length ? linkTextLength / text.length : 1;
+      const semanticBonus = el.matches("article, main article, [role='article']") ? 1200 : 0;
+      const score = Math.min(text.length, 30000) + Math.min(paragraphs, 40) * 80 + semanticBonus - linkRatio * 5000;
+      return { el, text, score };
+    })
+    .filter((item) => item.text.length >= 120)
+    .sort((a, b) => b.score - a.score);
+
+  return candidates[0]?.el || null;
 }
 
 function isCandidateBlock(el) {
@@ -3479,11 +3811,12 @@ function findBestReadableContainer() {
 
 function isBundleCandidateBlock(el) {
   if (!(el instanceof HTMLElement)) return false;
-  if (el.closest("script, style, noscript, svg, canvas, textarea, input, select, button, pre, code, kbd, samp, nav, header, footer, aside, [contenteditable='true'], [aria-hidden='true']")) return false;
+  if (el.closest(`script, style, noscript, svg, canvas, pre, code, kbd, samp, [contenteditable='true'], ${CONTENT_NOISE_SELECTOR}`)) return false;
   if (!isVisible(el)) return false;
 
   const text = extractOriginalTextForBundle(el);
   if (!text || text.length < 8) return false;
+  if (isLikelyPageChromeBlock(el, text)) return false;
 
   const rect = el.getBoundingClientRect();
   if (rect.width < 40 || rect.height < 6) return false;
@@ -3493,12 +3826,44 @@ function isBundleCandidateBlock(el) {
 
 function extractOriginalTextForBundle(el) {
   if (el.hasAttribute(ORIGINAL_HTML_ATTR)) {
-    return htmlToMarkdown(el.getAttribute(ORIGINAL_HTML_ATTR) || "");
+    const original = document.createElement("div");
+    original.innerHTML = el.getAttribute(ORIGINAL_HTML_ATTR) || "";
+    cleanBundleClone(original);
+    return extractBlockText(original);
   }
 
   const clone = el.cloneNode(true);
-  clone.querySelectorAll(`.${TRANSLATION_CLASS}, .${REPLACED_CLASS}`).forEach((node) => node.remove());
+  cleanBundleClone(clone);
   return extractBlockText(clone);
+}
+
+function cleanBundleClone(clone) {
+  clone.querySelectorAll(`.${TRANSLATION_CLASS}, .${REPLACED_CLASS}, ${CONTENT_NOISE_SELECTOR}`).forEach((node) => node.remove());
+  clone.querySelectorAll("a").forEach((link) => {
+    const text = normalizeText(link.textContent || "");
+    const parentText = normalizeText(link.parentElement?.textContent || "");
+    if (!text || parentText === text) {
+      link.remove();
+      return;
+    }
+    link.replaceWith(document.createTextNode(text));
+  });
+}
+
+function isLikelyPageChromeBlock(el, text) {
+  if (el.matches("a, button, [role='button'], [role='link']")) return true;
+  const links = Array.from(el.querySelectorAll("a"));
+  const linkTextLength = links.reduce((sum, link) => sum + normalizeText(link.innerText || link.textContent).length, 0);
+  const plainLength = normalizeText(text).length;
+  const linkRatio = plainLength ? linkTextLength / plainLength : 0;
+  if (links.length >= 3 && linkRatio > 0.45) return true;
+  if (linkRatio > 0.72 && plainLength < 260) return true;
+
+  const compact = normalizeText(text);
+  if (compact.length <= 80 && /^(?:登录|注册|订阅|分享|关注|点赞|收藏|下载|打开|关闭|返回|首页|菜单|更多|下一页|上一页|阅读全文|查看详情|login|sign up|subscribe|share|follow|like|download|open|close|home|menu|more|next|previous|read more)\b/i.test(compact)) {
+    return true;
+  }
+  return false;
 }
 
 function extractBlockText(el) {

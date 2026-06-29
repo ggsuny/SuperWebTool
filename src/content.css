@@ -903,24 +903,24 @@
   width: 18px;
   height: 18px;
   padding: 0;
-  border-color: rgba(17, 24, 39, 0.12);
+  border-color: rgba(148, 163, 184, 0.28);
   border-radius: 999px;
-  background: rgba(156, 163, 175, 0.62);
-  box-shadow: 0 2px 7px rgba(15, 23, 42, 0.1);
+  background: rgba(248, 250, 252, 0.96);
+  box-shadow: 0 3px 9px rgba(15, 23, 42, 0.12);
   opacity: 0;
   transform: scale(0.88);
   transition:
-    opacity 0.22s ease,
-    transform 0.22s ease,
-    width 0.18s ease,
-    height 0.18s ease,
-    background-color 0.18s ease,
-    border-color 0.18s ease,
-    box-shadow 0.18s ease;
+    opacity 0.22s ease-in-out,
+    transform 0.22s ease-in-out,
+    width 0.18s ease-in-out,
+    height 0.18s ease-in-out,
+    background-color 0.18s ease-in-out,
+    border-color 0.18s ease-in-out,
+    box-shadow 0.18s ease-in-out;
 }
 
 .pit-mark-note-composer.is-hover-note.is-visible {
-  opacity: 1;
+  opacity: 0.62;
   transform: scale(1);
 }
 
@@ -930,50 +930,44 @@
   pointer-events: none;
 }
 
+.pit-mark-note-composer.is-hover-note.has-content,
+.pit-mark-note-composer.is-hover-note.has-note {
+  width: 18px;
+  height: 18px;
+  border-color: rgba(22, 163, 74, 0.54);
+  background: #22c55e;
+  box-shadow: 0 3px 9px rgba(22, 163, 74, 0.22);
+  opacity: 0.72;
+}
+
+.pit-mark-note-composer.is-hover-note.is-closed.has-content,
+.pit-mark-note-composer.is-hover-note.is-closed.has-note {
+  width: 18px;
+  height: 18px;
+  border-color: rgba(22, 163, 74, 0.46);
+  background: #22c55e;
+  box-shadow: 0 3px 9px rgba(22, 163, 74, 0.22);
+  opacity: 0.72;
+}
+
 .pit-mark-note-composer.is-hover-note:hover,
+.pit-mark-note-composer.is-hover-note.is-hot,
 .pit-mark-note-composer.is-hover-note:focus-within {
   opacity: 1;
 }
 
-.pit-mark-note-composer.is-hover-note.has-note {
-  width: 24px;
-  height: 24px;
-  border-color: rgba(22, 163, 74, 0.54);
-  background: #16a34a;
-  box-shadow: 0 5px 12px rgba(22, 163, 74, 0.24);
-  opacity: 1;
-}
-
-.pit-mark-note-composer.is-hover-note:not(.is-target-hovered) {
+.pit-mark-note-composer.is-hover-note:not(.has-content):not(.has-note):not(.is-target-hovered):not(.is-hot):not(:hover):not(:focus-within) {
+  opacity: 0;
   border-color: transparent;
   background: transparent;
   box-shadow: none;
+  pointer-events: none;
 }
 
-.pit-mark-note-composer.is-hover-note:not(.is-target-hovered) .pit-mark-note-label {
+.pit-mark-note-composer.is-hover-note:not(.has-content):not(.has-note):not(.is-target-hovered):not(.is-hot):not(:hover):not(:focus-within) .pit-mark-note-label {
   opacity: 0 !important;
   visibility: hidden !important;
   pointer-events: none !important;
-}
-
-.pit-mark-note-composer.is-hover-note::after {
-  content: "";
-  position: absolute;
-  z-index: 0;
-  top: -10px;
-  right: 100%;
-  width: 14px;
-  height: 44px;
-}
-
-.pit-mark-note-composer.is-hover-note::before {
-  content: "";
-  position: absolute;
-  z-index: 0;
-  top: -10px;
-  left: 100%;
-  width: 14px;
-  height: 44px;
 }
 
 .pit-mark-note-composer[hidden] {
@@ -996,9 +990,9 @@
   height: 30px;
   min-height: 30px;
   box-sizing: border-box;
-  padding: 6px 72px 6px 9px;
+  padding: 6px 10px 6px 34px;
   border: 0;
-  border-radius: 0;
+  border-radius: 7px;
   outline: none;
   background: transparent;
   color: #1f2933;
@@ -1009,20 +1003,35 @@
   white-space: pre-wrap;
 }
 
-.pit-mark-note-input:focus {
-  box-shadow: none;
+.pit-mark-note-input.is-prompt {
+  color: #8a95a5;
 }
 
-.pit-mark-note-shortcut {
+.pit-mark-note-icon {
   position: absolute;
-  right: 8px;
-  bottom: 7px;
-  color: #98a2b3;
-  font-size: 11px;
-  font-weight: 500;
-  line-height: 1;
+  z-index: 1;
+  top: 7px;
+  left: 10px;
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  color: #64748b;
   pointer-events: none;
-  user-select: none;
+}
+
+.pit-mark-note-icon svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.pit-mark-note-input:focus {
+  box-shadow: none;
 }
 
 .pit-mark-note-composer.is-empty .pit-mark-note-input {
@@ -1041,12 +1050,9 @@
 
 .pit-mark-note-composer.is-hover-note .pit-mark-note-label {
   position: absolute;
-  inset: 0;
+  inset: -9px;
   z-index: 2;
-  display: grid;
-  place-items: center;
-  width: 100%;
-  height: 100%;
+  display: block;
   min-width: 0;
   color: transparent;
   padding: 0;
@@ -1056,20 +1062,51 @@
   cursor: pointer;
 }
 
-.pit-mark-note-composer.is-hover-note .pit-mark-note-label::before {
-  content: "+";
+.pit-mark-note-composer.is-hover-note .pit-mark-note-label::before,
+.pit-mark-note-composer.is-hover-note .pit-mark-note-label::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
   display: block;
-  color: rgba(17, 24, 39, 0.78);
-  font-size: 14px;
-  font-weight: 600;
-  line-height: 14px;
-  transform: translateY(-0.5px);
+  width: 10px;
+  height: 1.5px;
+  border-radius: 999px;
+  background: rgba(17, 24, 39, 0.78);
+  transform-origin: center;
+  transition:
+    transform 0.22s ease-in-out,
+    opacity 0.16s ease-in-out;
+  pointer-events: none;
 }
 
-.pit-mark-note-composer.is-hover-note.has-note .pit-mark-note-label::before {
-  color: #fff;
-  font-size: 17px;
-  line-height: 17px;
+.pit-mark-note-composer.is-hover-note .pit-mark-note-label::before {
+  transform: translate(-50%, -50%) rotate(0deg);
+}
+
+.pit-mark-note-composer.is-hover-note .pit-mark-note-label::after {
+  transform: translate(-50%, -50%) rotate(90deg);
+}
+
+.pit-mark-note-composer.is-hover-note.is-open.is-hot .pit-mark-note-label::before,
+.pit-mark-note-composer.is-hover-note.is-open:hover .pit-mark-note-label::before,
+.pit-mark-note-composer.is-hover-note.is-open:focus-within .pit-mark-note-label::before {
+  transform: translate(-50%, -50%) rotate(45deg);
+}
+
+.pit-mark-note-composer.is-hover-note.is-open.is-hot .pit-mark-note-label::after,
+.pit-mark-note-composer.is-hover-note.is-open:hover .pit-mark-note-label::after,
+.pit-mark-note-composer.is-hover-note.is-open:focus-within .pit-mark-note-label::after {
+  transform: translate(-50%, -50%) rotate(135deg);
+}
+
+.pit-mark-note-composer.is-hover-note.has-content .pit-mark-note-label::before,
+.pit-mark-note-composer.is-hover-note.has-content .pit-mark-note-label::after,
+.pit-mark-note-composer.is-hover-note.has-note .pit-mark-note-label::before,
+.pit-mark-note-composer.is-hover-note.has-note .pit-mark-note-label::after {
+  width: 10px;
+  height: 1.5px;
+  background: #fff;
 }
 
 .pit-mark-note-composer.is-hover-note .pit-mark-note-field {
@@ -1087,60 +1124,15 @@
   background: rgba(255, 255, 255, 0.98);
   box-shadow: 0 12px 28px rgba(15, 23, 42, 0.16);
   opacity: 0;
-  overflow: hidden;
+  overflow: visible;
   pointer-events: none;
   visibility: hidden;
   transform: translateY(-50%) translateX(-4px) scale(0.98);
   transform-origin: left center;
   transition:
-    opacity 0.18s ease,
-    transform 0.18s ease,
+    opacity 0.2s ease-in-out,
+    transform 0.2s ease-in-out,
     visibility 0s linear 0.18s;
-}
-
-.pit-mark-note-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  min-height: 26px;
-  padding: 4px 5px 0 9px;
-  border-bottom: 1px solid rgba(15, 23, 42, 0.06);
-  color: #667085;
-  user-select: none;
-}
-
-.pit-mark-note-drag-handle {
-  flex: 1;
-  padding: 3px 0;
-  font-size: 11px;
-  font-weight: 600;
-  cursor: grab;
-  touch-action: none;
-}
-
-.pit-mark-note-composer.is-dragging .pit-mark-note-drag-handle {
-  cursor: grabbing;
-}
-
-.pit-mark-note-close {
-  min-width: 0;
-  min-height: 0;
-  padding: 3px 5px;
-  border: 0;
-  border-radius: 4px;
-  background: transparent;
-  color: #667085;
-  font: inherit;
-  font-size: 10px;
-  line-height: 1;
-  cursor: pointer;
-}
-
-.pit-mark-note-close:hover,
-.pit-mark-note-close:focus-visible {
-  background: rgba(15, 23, 42, 0.07);
-  color: #182230;
-  outline: none;
 }
 
 .pit-mark-note-composer.is-hover-note.opens-below .pit-mark-note-field {
@@ -1149,6 +1141,15 @@
   left: auto;
   transform: translateY(-4px) scale(0.98);
   transform-origin: right top;
+}
+
+.pit-mark-note-composer.is-hover-note.opens-below.opens-above .pit-mark-note-field {
+  top: auto;
+  right: 0;
+  bottom: calc(100% + 8px);
+  left: auto;
+  transform: translateY(4px) scale(0.98);
+  transform-origin: right bottom;
 }
 
 .pit-mark-note-composer.is-hover-note.is-dragged .pit-mark-note-field {
@@ -1161,42 +1162,56 @@
 }
 
 .pit-mark-note-composer.is-hover-note:hover,
+.pit-mark-note-composer.is-hover-note.is-hot,
 .pit-mark-note-composer.is-hover-note:focus-within {
-  box-shadow: 0 3px 9px rgba(15, 23, 42, 0.16);
+  border-color: rgba(148, 163, 184, 0.28);
+  background: rgba(248, 250, 252, 0.96);
+  box-shadow: 0 3px 9px rgba(15, 23, 42, 0.12);
 }
 
+.pit-mark-note-composer.is-hover-note.has-content:hover,
+.pit-mark-note-composer.is-hover-note.has-content.is-hot,
+.pit-mark-note-composer.is-hover-note.has-content:focus-within,
 .pit-mark-note-composer.is-hover-note.has-note:hover,
+.pit-mark-note-composer.is-hover-note.has-note.is-hot,
 .pit-mark-note-composer.is-hover-note.has-note:focus-within {
+  border-color: rgba(22, 163, 74, 0.54);
+  background: #22c55e;
   box-shadow: 0 5px 12px rgba(22, 163, 74, 0.24);
 }
 
 .pit-mark-note-composer.is-hover-note:hover .pit-mark-note-field,
+.pit-mark-note-composer.is-hover-note.is-hot .pit-mark-note-field,
 .pit-mark-note-composer.is-hover-note:focus-within .pit-mark-note-field,
-.pit-mark-note-composer.is-hover-note.is-dragging .pit-mark-note-field,
-.pit-mark-note-composer.is-hover-note.has-content:not(.is-closed) .pit-mark-note-field,
-.pit-mark-note-composer.is-hover-note.has-note:not(.is-closed) .pit-mark-note-field {
+.pit-mark-note-composer.is-hover-note.is-dragging .pit-mark-note-field {
   opacity: 1;
   pointer-events: auto;
   visibility: visible;
   transform: translateY(-50%) translateX(0) scale(1);
   transition:
-    opacity 0.18s ease,
-    transform 0.18s ease,
+    opacity 0.2s ease-in-out,
+    transform 0.2s ease-in-out,
     visibility 0s;
 }
 
 .pit-mark-note-composer.is-hover-note.opens-below:hover .pit-mark-note-field,
+.pit-mark-note-composer.is-hover-note.opens-below.is-hot .pit-mark-note-field,
 .pit-mark-note-composer.is-hover-note.opens-below:focus-within .pit-mark-note-field,
-.pit-mark-note-composer.is-hover-note.opens-below.has-content:not(.is-closed) .pit-mark-note-field,
-.pit-mark-note-composer.is-hover-note.opens-below.has-note:not(.is-closed) .pit-mark-note-field {
+.pit-mark-note-composer.is-hover-note.opens-below.is-dragging .pit-mark-note-field {
+  transform: translateY(0) scale(1);
+}
+
+.pit-mark-note-composer.is-hover-note.opens-below.opens-above:hover .pit-mark-note-field,
+.pit-mark-note-composer.is-hover-note.opens-below.opens-above.is-hot .pit-mark-note-field,
+.pit-mark-note-composer.is-hover-note.opens-below.opens-above:focus-within .pit-mark-note-field,
+.pit-mark-note-composer.is-hover-note.opens-below.opens-above.is-dragging .pit-mark-note-field {
   transform: translateY(0) scale(1);
 }
 
 .pit-mark-note-composer.is-hover-note.is-dragged:hover .pit-mark-note-field,
+.pit-mark-note-composer.is-hover-note.is-dragged.is-hot .pit-mark-note-field,
 .pit-mark-note-composer.is-hover-note.is-dragged:focus-within .pit-mark-note-field,
-.pit-mark-note-composer.is-hover-note.is-dragged.is-dragging .pit-mark-note-field,
-.pit-mark-note-composer.is-hover-note.is-dragged.has-content:not(.is-closed) .pit-mark-note-field,
-.pit-mark-note-composer.is-hover-note.is-dragged.has-note:not(.is-closed) .pit-mark-note-field {
+.pit-mark-note-composer.is-hover-note.is-dragged.is-dragging .pit-mark-note-field {
   transform: none;
 }
 
@@ -1211,6 +1226,7 @@
 }
 
 .pit-mark-note-composer.is-hover-note:hover .pit-mark-note-label,
+.pit-mark-note-composer.is-hover-note.is-hot .pit-mark-note-label,
 .pit-mark-note-composer.is-hover-note:focus-within .pit-mark-note-label {
   opacity: 1;
   pointer-events: auto;
@@ -1371,6 +1387,75 @@
 
 .pit-mark-flyout.is-flying {
   animation: pitMarkFlyToPanel 0.68s cubic-bezier(0.2, 0.84, 0.22, 1) forwards;
+}
+
+.pit-unsaved-note-prompt {
+  position: fixed;
+  z-index: 2147483647;
+  right: 50%;
+  bottom: 22px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  box-sizing: border-box;
+  max-width: min(420px, calc(100vw - 28px));
+  padding: 10px 12px 10px 14px;
+  border: 1px solid rgba(15, 23, 42, 0.12);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.96);
+  color: #1f2933;
+  box-shadow: 0 12px 34px rgba(15, 23, 42, 0.2);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 13px;
+  line-height: 1.35;
+  transform: translateX(50%);
+}
+
+.pit-unsaved-note-prompt span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pit-unsaved-note-copy {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.pit-unsaved-note-copy small {
+  min-width: 0;
+  overflow: hidden;
+  color: #6b7280;
+  font-size: 11px;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pit-unsaved-note-prompt button {
+  flex: 0 0 auto;
+  min-height: 30px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 6px;
+  background: #16a34a;
+  color: #fff;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.pit-unsaved-note-prompt button:hover,
+.pit-unsaved-note-prompt button:focus-visible {
+  background: #15803d;
+  outline: none;
+}
+
+.pit-unsaved-note-prompt button:disabled {
+  cursor: progress;
+  opacity: 0.72;
 }
 
 @keyframes pitPanelReceiveMark {
