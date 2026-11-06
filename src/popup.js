@@ -2,18 +2,27 @@ const DEFAULT_SETTINGS = {
   provider: "ollama",
   mode: "append",
   translationStyle: "bar",
+  shortTextReplaceMode: false,
+  markStyle: "highlight",
+  markHighlightColor: "#fff2a8",
+  markHighlightColorLight: "#fff2a8",
+  markHighlightColorDark: "#facc15",
   model: "qwen3.5:4b",
   baseUrl: "http://localhost:11434",
   apiKey: "",
+  providerConfigs: {},
   summaryPrompt: "",
   saveDir: "page-notes",
+  noteSaveShortcut: "enter",
   saveUrl: true,
   saveOriginal: true,
   saveTranslation: true,
   saveSummary: true,
   saveNote: true,
   userNote: "",
-  allowWebSearch: true
+  allowWebSearch: true,
+  localQaUrl: "http://localhost:3218",
+  localQaNotesDir: ""
 };
 
 const UI_STATE_KEY = "pit_popup_ui_state";
@@ -23,6 +32,7 @@ const controls = {
   panels: Array.from(document.querySelectorAll(".tab-panel")),
   mode: document.querySelector("#mode"),
   translationStyle: document.querySelector("#translationStyle"),
+  shortTextReplaceMode: document.querySelector("#shortTextReplaceMode"),
   provider: document.querySelector("#provider"),
   ollamaModel: document.querySelector("#ollamaModel"),
   model: document.querySelector("#model"),
@@ -38,6 +48,15 @@ const controls = {
   askMessages: document.querySelector("#askMessages"),
   askQuestion: document.querySelector("#askQuestion"),
   allowWebSearch: document.querySelector("#allowWebSearch"),
+  localQaUrl: document.querySelector("#localQaUrl"),
+  localQaNotesDir: document.querySelector("#localQaNotesDir"),
+  localQaPickDirBtn: document.querySelector("#localQaPickDirBtn"),
+  localQaStatus: document.querySelector("#localQaStatus"),
+  localQaOpenBtn: document.querySelector("#localQaOpenBtn"),
+  localQaIndexBtn: document.querySelector("#localQaIndexBtn"),
+  localQaMessages: document.querySelector("#localQaMessages"),
+  localQaQuestion: document.querySelector("#localQaQuestion"),
+  localQaAskBtn: document.querySelector("#localQaAskBtn"),
   userNote: document.querySelector("#userNote"),
   saveUrl: document.querySelector("#saveUrl"),
   saveOriginal: document.querySelector("#saveOriginal"),
@@ -53,15 +72,32 @@ const controls = {
   statusDot: document.querySelector("#statusDot")
 };
 
+let providerConfigs = {};
+let selectedProvider = "ollama";
+
 let askOverviewLoaded = false;
 let askOverviewMarkdown = "";
 let askMessages = [];
+let localQaMessages = [];
 let currentUiStateKey = UI_STATE_KEY;
+let retainedMarkSettings = {
+  markStyle: DEFAULT_SETTINGS.markStyle,
+  markHighlightColor: DEFAULT_SETTINGS.markHighlightColor,
+  markHighlightColorLight: DEFAULT_SETTINGS.markHighlightColorLight,
+  markHighlightColorDark: DEFAULT_SETTINGS.markHighlightColorDark
+};
 
 init();
 
 async function init() {
   const settings = await loadSettings();
+  retainedMarkSettings = {
+    markStyle: settings.markStyle,
+    markHighlightColor: settings.markHighlightColor,
+    markHighlightColorLight: settings.markHighlightColorLight,
+    markHighlightColorDark: settings.markHighlightColorDark
+  };
+  chrome.storage.onChanged.addListener(updateRetainedMarkSettings);
   applySettings(settings);
   bindTabs();
   currentUiStateKey = await getUiStateKey();
@@ -70,18 +106,26 @@ async function init() {
 
   ["change", "input"].forEach((eventName) => {
     [
-      "mode", "translationStyle", "provider", "ollamaModel", "model", "baseUrl",
+      "mode", "translationStyle", "shortTextReplaceMode", "ollamaModel", "model", "baseUrl",
       "apiKey", "saveDir", "summaryPrompt", "userNote", "saveUrl", "saveOriginal",
-      "saveTranslation", "saveSummary", "saveNote", "allowWebSearch"
+      "saveTranslation", "saveSummary", "saveNote", "allowWebSearch", "localQaUrl", "localQaNotesDir"
     ].forEach((key) => {
       controls[key].addEventListener(eventName, persistSettings);
     });
   });
 
   controls.provider.addEventListener("change", async () => {
-    const providerDefaults = getProviderDefaults(controls.provider.value);
-    controls.baseUrl.value = providerDefaults.baseUrl;
-    controls.model.value = providerDefaults.model;
+    const previous = readSettings();
+    providerConfigs[selectedProvider] = {
+      baseUrl: previous.baseUrl,
+      model: selectedProvider === "ollama" ? controls.ollamaModel.value || controls.model.value : controls.model.value.trim(),
+      apiKey: previous.apiKey
+    };
+    selectedProvider = controls.provider.value;
+    const config = providerConfigs[selectedProvider] || { ...getProviderDefaults(selectedProvider), apiKey: "" };
+    controls.baseUrl.value = config.baseUrl;
+    controls.model.value = config.model;
+    controls.apiKey.value = config.apiKey || "";
     await updateProviderFields();
     await persistSettings();
   });
@@ -103,6 +147,10 @@ async function init() {
   controls.summaryToggleBtn.addEventListener("click", toggleSummaryResult);
   controls.askOverviewBtn.addEventListener("click", () => loadAskOverview({ force: true }));
   controls.askBtn.addEventListener("click", askCurrentArticle);
+  controls.localQaOpenBtn.addEventListener("click", openLocalQaPage);
+  controls.localQaPickDirBtn.addEventListener("click", pickLocalQaDirectory);
+  controls.localQaIndexBtn.addEventListener("click", reindexLocalQa);
+  controls.localQaAskBtn.addEventListener("click", askLocalNotes);
   controls.saveNoteBtn.addEventListener("click", saveMarkdownNote);
   controls.askQuestion.addEventListener("input", () => {
     resizeAskInput();
@@ -112,6 +160,16 @@ async function init() {
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
       askCurrentArticle();
+    }
+  });
+  controls.localQaQuestion.addEventListener("input", () => {
+    resizeLocalQaInput();
+    saveUiState();
+  });
+  controls.localQaQuestion.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      askLocalNotes();
     }
   });
 
@@ -128,6 +186,7 @@ function bindTabs() {
         openAskPanelInPage();
         if (!askOverviewLoaded) loadAskOverview();
       }
+      if (target === "localQa") checkLocalQaStatus();
     });
   });
 }
@@ -203,6 +262,10 @@ async function saveMarkdownNote() {
       page,
       note: controls.userNote.value.trim(),
       options: {
+        provider: settings.provider,
+        model: settings.model,
+        baseUrl: settings.baseUrl,
+        apiKey: settings.apiKey,
         saveDir: settings.saveDir,
         saveUrl: settings.saveUrl,
         saveOriginal: settings.saveOriginal,
@@ -258,7 +321,7 @@ async function askCurrentArticle() {
   controls.askQuestion.value = "";
   resizeAskInput();
   saveUiState();
-  const pendingId = appendAskMessage("assistant", "正在思考...", { pending: true });
+  const pendingId = appendAskMessage("assistant", "正在思考", { pending: true });
   setBusy(true, "正在回答...");
 
   try {
@@ -283,6 +346,152 @@ async function askCurrentArticle() {
   } finally {
     setBusy(false);
   }
+}
+
+async function checkLocalQaStatus() {
+  setPassiveBusy(true, "正在连接本地问答服务...");
+  try {
+    const response = await localQaRequest("/api/config", { method: "GET" });
+    const index = response.index || {};
+    controls.localQaStatus.textContent = index.builtAt
+      ? `已连接。索引 ${index.fileCount || 0} 个文件、${index.chunkCount || 0} 个片段。`
+      : "已连接，尚未建立索引。";
+    if (response.config?.notesDir && !controls.localQaNotesDir.value.trim()) {
+      controls.localQaNotesDir.value = response.config.notesDir;
+    }
+    setStatus("ok", "本地问答服务已连接。");
+  } catch (error) {
+    controls.localQaStatus.textContent = `未连接：${error?.message || String(error)}`;
+    setStatus("error", "请先启动本地问答服务。");
+  } finally {
+    setPassiveBusy(false);
+  }
+}
+
+async function openLocalQaPage() {
+  await persistSettings();
+  await chrome.tabs.create({ url: normalizeLocalQaUrl(controls.localQaUrl.value) });
+}
+
+async function reindexLocalQa() {
+  setBusy(true, "正在更新本地笔记索引...");
+  try {
+    await persistLocalQaConfig();
+    const response = await localQaRequest("/api/index", {
+      method: "POST",
+      body: "{}"
+    });
+    const index = response.index || {};
+    controls.localQaStatus.textContent = `已索引 ${index.fileCount || 0} 个文件、${index.chunkCount || 0} 个片段。`;
+    setStatus("ok", "本地笔记索引已更新。");
+  } catch (error) {
+    controls.localQaStatus.textContent = error?.message || String(error);
+    setStatus("error", error?.message || String(error));
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function pickLocalQaDirectory() {
+  setBusy(true, "正在打开目录选择器...");
+  try {
+    const response = await localQaRequest("/api/pick-directory", {
+      method: "POST",
+      body: "{}"
+    });
+    if (response.cancelled) {
+      setStatus("ok", "已取消选择。");
+      return;
+    }
+    controls.localQaNotesDir.value = response.path || "";
+    await persistSettings();
+    await reindexLocalQa();
+  } catch (error) {
+    controls.localQaStatus.textContent = error?.message || String(error);
+    setStatus("error", error?.message || String(error));
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function askLocalNotes() {
+  const question = controls.localQaQuestion.value.trim();
+  if (!question) {
+    setStatus("error", "请输入问题。");
+    return;
+  }
+
+  appendLocalQaMessage("user", question);
+  controls.localQaQuestion.value = "";
+  resizeLocalQaInput();
+  saveUiState();
+  const pendingId = appendLocalQaMessage("assistant", "正在检索本地笔记", { pending: true });
+  setBusy(true, "正在回答本地笔记问题...");
+
+  try {
+    await persistLocalQaConfig();
+    const response = await localQaRequest("/api/ask", {
+      method: "POST",
+      body: JSON.stringify({ question })
+    });
+    updateLocalQaMessage(pendingId, formatLocalQaAnswer(response.answer, response.sources));
+    setStatus("ok", "已基于本地笔记回答。");
+  } catch (error) {
+    updateLocalQaMessage(pendingId, error?.message || String(error));
+    setStatus("error", error?.message || String(error));
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function persistLocalQaConfig() {
+  await persistSettings();
+  const settings = readSettings();
+  const notesDir = controls.localQaNotesDir.value.trim();
+  await localQaRequest("/api/config", {
+    method: "POST",
+    body: JSON.stringify({
+      notesDir,
+      provider: settings.provider === "antLing" ? "openaiCompatible" : settings.provider,
+      baseUrl: settings.baseUrl,
+      model: settings.model,
+      apiKey: settings.apiKey
+    })
+  });
+}
+
+async function localQaRequest(path, options = {}) {
+  const response = await fetch(`${normalizeLocalQaUrl(controls.localQaUrl.value)}${path}`, {
+    headers: { "Content-Type": "application/json" },
+    ...options
+  });
+  const data = await response.json();
+  if (!response.ok || !data.ok) throw new Error(data.error || "本地问答服务请求失败。");
+  return data;
+}
+
+function formatLocalQaAnswer(answer, sources = []) {
+  const sourceLines = (sources || [])
+    .slice(0, 6)
+    .map((source) => {
+      const sourceUrl = source.sourceUrl
+        ? `${normalizeLocalQaUrl(controls.localQaUrl.value)}${source.sourceUrl}`
+        : "";
+      const label = `${source.relativePath || source.file} · ${source.title || ""}`.trim();
+      const time = source.sourceTime?.label || "未知";
+      return sourceUrl
+        ? `- [${label}](${sourceUrl}) · 材料时间：${time}`
+        : `- ${label} · 材料时间：${time}`;
+    })
+    .join("\n");
+  return sourceLines
+    ? `${answer || "没有得到回答。"}\n\n来源\n${sourceLines}`
+    : answer || "没有得到回答。";
+}
+
+function normalizeLocalQaUrl(value) {
+  const raw = String(value || DEFAULT_SETTINGS.localQaUrl).trim() || DEFAULT_SETTINGS.localQaUrl;
+  return raw.replace(/\/+$/, "");
 }
 
 async function openAskPanelInPage() {
@@ -319,8 +528,11 @@ async function loadSettings() {
 }
 
 function applySettings(settings) {
+  providerConfigs = { ...settings.providerConfigs };
+  selectedProvider = settings.provider;
   controls.mode.value = settings.mode;
   controls.translationStyle.value = settings.translationStyle || DEFAULT_SETTINGS.translationStyle;
+  controls.shortTextReplaceMode.checked = Boolean(settings.shortTextReplaceMode);
   controls.provider.value = settings.provider;
   controls.model.value = settings.model;
   controls.baseUrl.value = settings.baseUrl;
@@ -329,6 +541,8 @@ function applySettings(settings) {
   controls.summaryPrompt.value = settings.summaryPrompt || "";
   controls.userNote.value = settings.userNote || "";
   controls.allowWebSearch.checked = Boolean(settings.allowWebSearch);
+  controls.localQaUrl.value = settings.localQaUrl || DEFAULT_SETTINGS.localQaUrl;
+  controls.localQaNotesDir.value = settings.localQaNotesDir || "";
   controls.saveUrl.checked = Boolean(settings.saveUrl);
   controls.saveOriginal.checked = Boolean(settings.saveOriginal);
   controls.saveTranslation.checked = Boolean(settings.saveTranslation);
@@ -338,7 +552,8 @@ function applySettings(settings) {
 
 async function persistSettings() {
   const settings = readSettings();
-  const { userNote, ...syncSettings } = settings;
+  providerConfigs[settings.provider] = { baseUrl: settings.baseUrl, model: settings.model, apiKey: settings.apiKey };
+  const { userNote, ...syncSettings } = { ...settings, providerConfigs };
   await chrome.storage.sync.set(syncSettings);
   await saveUiState();
 }
@@ -346,16 +561,22 @@ async function persistSettings() {
 function readSettings() {
   const isOllama = controls.provider.value === "ollama";
   return {
+    ...retainedMarkSettings,
     mode: controls.mode.value,
     translationStyle: controls.translationStyle.value,
+    shortTextReplaceMode: controls.shortTextReplaceMode.checked,
     provider: controls.provider.value,
+    providerConfigs,
     model: (isOllama ? controls.ollamaModel.value || controls.model.value : controls.model.value).trim(),
     baseUrl: controls.baseUrl.value.trim(),
     apiKey: controls.apiKey.value.trim(),
     saveDir: normalizeSaveDir(controls.saveDir.value),
+    noteSaveShortcut: "auto",
     summaryPrompt: controls.summaryPrompt.value.trim(),
     userNote: controls.userNote.value,
     allowWebSearch: controls.allowWebSearch.checked,
+    localQaUrl: normalizeLocalQaUrl(controls.localQaUrl.value),
+    localQaNotesDir: controls.localQaNotesDir.value.trim(),
     saveUrl: controls.saveUrl.checked,
     saveOriginal: controls.saveOriginal.checked,
     saveTranslation: controls.saveTranslation.checked,
@@ -364,7 +585,19 @@ function readSettings() {
   };
 }
 
+function updateRetainedMarkSettings(changes, areaName) {
+  if (areaName !== "sync") return;
+  for (const key of Object.keys(retainedMarkSettings)) {
+    if (changes[key]?.newValue !== undefined) {
+      retainedMarkSettings[key] = changes[key].newValue;
+    }
+  }
+}
+
 function getProviderDefaults(provider) {
+  if (provider === "antLing") {
+    return { baseUrl: "https://api.ant-ling.com/v1", model: "Ling-3.0-flash" };
+  }
   if (provider === "openaiCompatible") {
     return {
       baseUrl: "https://api.groq.com/openai/v1",
@@ -403,7 +636,11 @@ function isMissingReceiverError(error) {
 }
 
 async function updateProviderFields() {
-  const isOnline = controls.provider.value === "openaiCompatible";
+  const isOnline = controls.provider.value !== "ollama";
+  const defaults = getProviderDefaults(controls.provider.value);
+  controls.baseUrl.placeholder = defaults.baseUrl;
+  controls.model.placeholder = defaults.model;
+  controls.apiKey.placeholder = controls.provider.value === "antLing" ? "填写百灵控制台创建的 API Key" : "仅在线 API 需要";
   controls.ollamaModel.style.display = isOnline ? "none" : "block";
   controls.model.style.display = isOnline ? "block" : "none";
   document.querySelector(".api-key-field").style.display = isOnline ? "grid" : "none";
@@ -508,6 +745,10 @@ function setBusy(isBusy, message = "") {
     controls.summaryBtn,
     controls.askOverviewBtn,
     controls.askBtn,
+    controls.localQaOpenBtn,
+    controls.localQaPickDirBtn,
+    controls.localQaIndexBtn,
+    controls.localQaAskBtn,
     controls.saveNoteBtn
   ].forEach((button) => {
     button.disabled = isBusy;
@@ -567,6 +808,30 @@ function renderAskMessages() {
   controls.askMessages.scrollTop = controls.askMessages.scrollHeight;
 }
 
+function appendLocalQaMessage(role, text, options = {}) {
+  const id = `local_msg_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+  localQaMessages.push({ id, role, text, pending: Boolean(options.pending) });
+  renderLocalQaMessages();
+  saveUiState();
+  return id;
+}
+
+function updateLocalQaMessage(id, text) {
+  const message = localQaMessages.find((item) => item.id === id);
+  if (!message) return;
+  message.text = text;
+  message.pending = false;
+  renderLocalQaMessages();
+  saveUiState();
+}
+
+function renderLocalQaMessages() {
+  controls.localQaMessages.replaceChildren(
+    ...localQaMessages.map((message) => createAskMessageNode(message))
+  );
+  controls.localQaMessages.scrollTop = controls.localQaMessages.scrollHeight;
+}
+
 function createAskMessageNode(message) {
   const node = document.createElement("div");
   node.className = `ask-message is-${message.role}${message.pending ? " is-pending" : ""}`;
@@ -599,10 +864,15 @@ async function restoreUiState() {
   }
   askMessages = Array.isArray(state.askMessages) ? state.askMessages : [];
   renderAskMessages();
+  localQaMessages = Array.isArray(state.localQaMessages) ? state.localQaMessages : [];
+  renderLocalQaMessages();
   controls.askQuestion.value = state.askQuestion || "";
+  controls.localQaQuestion.value = state.localQaQuestion || "";
   controls.userNote.value = state.userNote || "";
   resizeAskInput();
+  resizeLocalQaInput();
   if (state.activeTab) activateTab(state.activeTab);
+  if (state.activeTab === "localQa") checkLocalQaStatus();
 }
 
 async function saveUiState() {
@@ -617,7 +887,9 @@ async function saveUiState() {
       askOverviewMarkdown,
       askOverviewLoaded,
       askMessages,
+      localQaMessages,
       askQuestion: controls.askQuestion.value,
+      localQaQuestion: controls.localQaQuestion.value,
       userNote: controls.userNote.value
     }
   });
@@ -699,6 +971,7 @@ function renderMarkdown(markdown) {
 
 function renderInlineMarkdown(text) {
   return text
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>')
     .replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>")
     .replace(/`([^`]+)`/g, "<code>$1</code>");
 }
@@ -721,6 +994,12 @@ function resizeAskInput() {
   controls.askQuestion.style.height = "auto";
   const nextHeight = Math.min(96, Math.max(34, controls.askQuestion.scrollHeight));
   controls.askQuestion.style.height = `${nextHeight}px`;
+}
+
+function resizeLocalQaInput() {
+  controls.localQaQuestion.style.height = "auto";
+  const nextHeight = Math.min(96, Math.max(34, controls.localQaQuestion.scrollHeight));
+  controls.localQaQuestion.style.height = `${nextHeight}px`;
 }
 
 function normalizeSaveDir(value) {

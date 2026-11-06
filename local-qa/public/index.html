@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>本地笔记问答</title>
+    <link rel="stylesheet" href="/style.css">
+  </head>
+  <body>
+    <main class="shell">
+      <section class="topbar">
+        <div>
+          <h1>本地笔记问答</h1>
+          <p id="indexMeta">连接本地 Markdown 知识库。</p>
+        </div>
+        <button id="reindexBtn" type="button">重新索引</button>
+      </section>
+
+      <section class="settings">
+        <label>
+          <span>Markdown 笔记目录</span>
+          <div class="path-picker">
+            <input id="notesDir" placeholder="点击右侧按钮选择目录">
+            <button id="pickDirBtn" type="button">选择目录</button>
+          </div>
+        </label>
+        <label>
+          <span>模型服务</span>
+          <select id="provider">
+            <option value="ollama">本地 Ollama</option>
+            <option value="openaiCompatible">OpenAI-compatible API</option>
+          </select>
+        </label>
+        <label>
+          <span>Base URL</span>
+          <input id="baseUrl" placeholder="http://localhost:11434">
+        </label>
+        <label>
+          <span>模型</span>
+          <input id="model" placeholder="qwen3.5:4b">
+        </label>
+        <label id="apiKeyWrap">
+          <span>API Key</span>
+          <input id="apiKey" type="password" placeholder="在线 API 才需要">
+        </label>
+        <button id="saveConfigBtn" type="button">保存设置</button>
+      </section>
+
+      <section id="messages" class="messages" aria-label="问答记录"></section>
+
+      <form id="askForm" class="composer">
+        <textarea id="question" rows="2" placeholder="问问你的 Markdown 笔记，例如：我之前关于 Chrome 插件权限怎么总结的？"></textarea>
+        <button id="askBtn" type="submit">提问</button>
+      </form>
+
+      <p id="status" class="status"></p>
+    </main>
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>

@@ -1,0 +1,8 @@
+{
+  "scripts": {
+    "qa": "node scripts/local-qa-server.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
