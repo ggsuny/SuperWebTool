@@ -20,6 +20,7 @@
         <button class="tab is-active" data-tab="translate" type="button">🌐 翻译</button>
         <button class="tab" data-tab="summary" type="button">🧭 总结</button>
         <button class="tab" data-tab="ask" type="button">💬 Ask</button>
+        <button class="tab" data-tab="localQa" type="button">📚 问笔记</button>
         <button class="tab" data-tab="notes" type="button">✎ 笔记</button>
         <button class="tab" data-tab="settings" type="button">⚙️ 设置</button>
       </nav>
@@ -105,6 +106,42 @@
         </section>
       </section>
 
+      <section class="tab-panel" data-panel="localQa">
+        <section class="panel">
+          <label class="field">
+            <span>本地问答服务</span>
+            <input id="localQaUrl" placeholder="http://localhost:3218">
+          </label>
+
+          <label class="field">
+            <span>Markdown 笔记目录</span>
+            <div class="path-picker">
+              <input id="localQaNotesDir" placeholder="点击右侧按钮选择目录">
+              <button id="localQaPickDirBtn" class="secondary" type="button">选择</button>
+            </div>
+          </label>
+
+          <div class="local-qa-status" id="localQaStatus">打开本地服务后可连接。</div>
+        </section>
+
+        <section class="actions two">
+          <button id="localQaOpenBtn" class="secondary" type="button">打开网页</button>
+          <button id="localQaIndexBtn" class="secondary" type="button">重新索引</button>
+        </section>
+
+        <section class="ask-chat local-qa-chat" id="localQaMessages" aria-label="本地笔记问答记录"></section>
+
+        <section class="panel ask-box">
+          <label class="field">
+            <textarea id="localQaQuestion" rows="1" placeholder="问问你的本地 Markdown 笔记。按 Enter 发送"></textarea>
+          </label>
+        </section>
+
+        <section class="actions single">
+          <button id="localQaAskBtn" class="primary" type="button">问本地笔记</button>
+        </section>
+      </section>
+
       <section class="tab-panel" data-panel="notes">
         <section class="panel">
           <label class="field">
@@ -133,6 +170,7 @@
             <select id="provider">
               <option value="ollama">本地 Ollama</option>
               <option value="openaiCompatible">OpenAI-compatible API</option>
+              <option value="antLing">蚂蚁百灵 AI</option>
             </select>
           </label>
 

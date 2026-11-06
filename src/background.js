@@ -248,9 +248,24 @@ chrome.runtime.onConnect.addListener((port) => {
   });
 });
 
-async function streamTranslationToPort(text, settings = {}, port, controller) {
+function resolveProviderSettings(settings = {}) {
   const resolved = { ...DEFAULT_SETTINGS, ...settings };
-  if (resolved.provider === "openaiCompatible") {
+  if (resolved.provider === "antLing") {
+    resolved.baseUrl = settings.baseUrl?.trim() || "https://api.ant-ling.com/v1";
+    resolved.model = settings.model?.trim() || "Ling-3.0-flash";
+    resolved.apiKey = settings.apiKey?.trim() || "";
+    if (!resolved.apiKey) throw new Error("请先在设置中填写蚂蚁百灵 API Key。");
+  }
+  return resolved;
+}
+
+function onlineProviderOptions(settings) {
+  return settings.provider === "antLing" ? { thinking: { type: "disabled" } } : {};
+}
+
+async function streamTranslationToPort(text, settings = {}, port, controller) {
+  const resolved = resolveProviderSettings(settings);
+  if (["openaiCompatible", "antLing"].includes(resolved.provider)) {
     return streamOpenAICompatibleToPort(text, resolved, port, controller);
   }
 
@@ -259,11 +274,11 @@ async function streamTranslationToPort(text, settings = {}, port, controller) {
 
 // ─── 批量翻译（用于视口外的段落，效率优先）────────────────────
 async function translateBatch(texts, settings = {}) {
-  const resolved = { ...DEFAULT_SETTINGS, ...settings };
+  const resolved = resolveProviderSettings(settings);
   const cleanTexts = texts.map((text) => String(text || "").trim());
   if (!cleanTexts.length) return [];
 
-  if (resolved.provider === "openaiCompatible") {
+  if (["openaiCompatible", "antLing"].includes(resolved.provider)) {
     try {
       return await translateWithOpenAICompatible(cleanTexts, resolved);
     } catch (onlineError) {
@@ -352,6 +367,7 @@ async function translateWithOpenAICompatible(texts, settings) {
     headers,
     body: JSON.stringify({
       model: settings.model,
+      ...onlineProviderOptions(settings),
       temperature: 0.1,
       messages: buildMessages(texts)
     })
@@ -376,6 +392,7 @@ async function streamOpenAICompatibleToPort(text, settings = {}, port, controlle
     signal: controller.signal,
     body: JSON.stringify({
       model: settings.model,
+      ...onlineProviderOptions(settings),
       stream: true,
       temperature: 0,
       messages: [
@@ -474,7 +491,7 @@ async function streamOllamaToPort(text, settings = {}, port, controller) {
           },
           {
             role: "user",
-            content: `/no_think\n${source}`
+            content: source
           }
         ]
       })
@@ -578,7 +595,7 @@ async function prewarmOllama(settings = {}) {
         },
         messages: [
           { role: "system", content: "Translate the text to Simplified Chinese. Do not translate or alter PITLINK or PITTOKEN placeholders. Output only the translation." },
-          { role: "user", content: "/no_think\nwarm up" }
+          { role: "user", content: "warm up" }
         ]
       })
     });
@@ -619,6 +636,9 @@ function markOllamaWarm(settings = {}) {
 
 async function saveMarkdownNote(page = {}, note = "", options = {}) {
   const savedNote = String(note || "").trim();
+  // Never put an LLM request on the save path. Reuse a title prepared while
+  // reading when possible, otherwise fall back locally so the download starts
+  // immediately even when Ollama or a cloud provider is slow/offline.
   const noteTitle = normalizeGeneratedNoteTitle(page.noteTitle) || buildMeaningfulNoteTitle(page, savedNote);
   const originalSummary = options.saveOriginal
     ? String(page.originalSummary || "").trim() || buildExtractiveSummary(pageToArticleText(page))
@@ -753,8 +773,8 @@ async function cleanNoteContent(note = "", settings = {}) {
 }
 
 async function chatWithConfiguredProvider(settings = {}, messages, options = {}) {
-  const resolved = { ...DEFAULT_SETTINGS, ...settings };
-  if (resolved.provider !== "openaiCompatible") {
+  const resolved = resolveProviderSettings(settings);
+  if (!["openaiCompatible", "antLing"].includes(resolved.provider)) {
     return chatWithLocalOllama(resolved, messages, options);
   }
 
@@ -770,6 +790,7 @@ async function chatWithConfiguredProvider(settings = {}, messages, options = {})
       signal: controller.signal,
       body: JSON.stringify({
         model: resolved.model,
+        ...onlineProviderOptions(resolved),
         temperature: 0,
         max_tokens: options.num_predict || 2000,
         messages
@@ -875,18 +896,19 @@ function markdownDedupeKey(value) {
 }
 
 async function generateSummaryNoteTitle(page = {}, note = "", options = {}) {
-  const fallback = buildMeaningfulNoteTitle(page, note);
+  const fallback = getWebpageTitle(page);
   const source = buildTitleSourceText(page, note);
   if (source.length < 20) return fallback;
 
   try {
-    const raw = await chatWithLocalOllama(options, [
+    const raw = await chatWithConfiguredProvider(options, [
       {
         role: "system",
         content: [
-          "你是中文笔记标题生成器。",
-          "根据文章总结、翻译和笔记，生成一个不超过12个汉字的中文标题。",
-          "标题要具体、有信息量，避免“文章总结”“网页笔记”等泛泛表达。",
+          "你是网页 Markdown 笔记的标题生成器。",
+          "只根据提供的网页内容总结主题，并生成适合作为文件名的简短中文标题。",
+          "可使用3到6个关键词组成标题；标题要具体、有信息量，避免“文章总结”“网页笔记”等泛泛表达。",
+          "不超过12个汉字。",
           "只输出标题本身，不要解释、引号、标点或 Markdown。"
         ].join("")
       },
@@ -903,10 +925,18 @@ async function generateSummaryNoteTitle(page = {}, note = "", options = {}) {
   }
 }
 
+function getWebpageTitle(page = {}) {
+  const title = String(page.title || "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return title || "网页笔记";
+}
+
 async function buildArticleOverview(page = {}, settings = {}) {
   const isX = page.sourceType === "x" || /(^|\.)x\.com\//i.test(page.url || "") || /(^|\.)twitter\.com\//i.test(page.url || "");
   const articleText = (isX ? pageToXConversationText(page) : pageToArticleText(page)).slice(0, 18000);
   if (articleText.length < 80) throw new Error("文章内容太少，无法生成脉络。");
+  const focus = String(settings.summaryPrompt || "").trim();
 
   const content = await chatWithLocalOllama(settings, [
     {
@@ -925,6 +955,7 @@ async function buildArticleOverview(page = {}, settings = {}) {
           "只根据文章内容输出，不补充外部知识。",
           "用 Markdown 输出，包含二级标题和项目符号。",
           "用简洁中文展示：核心架构、主要观点、关键数据或事实。",
+          focus ? `额外关注：${focus}。` : "",
           "如果文章没有数据，就写“文章未提供明确数据”。",
           "总长度控制在220字以内。"
         ].join("")
@@ -1295,9 +1326,10 @@ function buildTitleSourceText(page = {}, note = "") {
   const blocks = Array.isArray(page.blocks) ? page.blocks : [];
   return [
     page.summary,
-    note,
-    blocks.map((block) => block.translation).filter(Boolean).slice(0, 8).join("\n"),
-    blocks.map((block) => block.original).filter(Boolean).slice(0, 5).join("\n")
+    page.originalSummary,
+    blocks.map((block) => block.original).filter(Boolean).join("\n"),
+    blocks.map((block) => block.translation).filter(Boolean).join("\n"),
+    note
   ].filter(Boolean).join("\n\n").slice(0, 6000);
 }
 
@@ -1375,7 +1407,7 @@ function buildSingleMessage(text) {
     },
     {
       role: "user",
-      content: `/no_think\n${text}`
+      content: text
     }
   ];
 }
@@ -1389,7 +1421,7 @@ function buildMessages(texts) {
     },
     {
       role: "user",
-      content: `/no_think\nTranslate to Simplified Chinese, keep array length ${texts.length}:\n${JSON.stringify(texts)}`
+      content: `Translate to Simplified Chinese, keep array length ${texts.length}:\n${JSON.stringify(texts)}`
     }
   ];
 }
@@ -1445,7 +1477,9 @@ function stripModelNoise(content) {
   let cleaned = String(content || "")
     .replace(/<think\b[^>]*>[\s\S]*?(?:<\/think>|$)/gi, "")
     .replace(/<thinking\b[^>]*>[\s\S]*?(?:<\/thinking>|$)/gi, "")
-    .replace(/^\s*(?:\/?no[_\s-]*think|<no[_\s-]*think\s*\/?>)\s*$/gim, "")
+    .replace(/^\s*(?:\/?\s*no[_\s-]*think(?:ing)?|<\s*no[_\s-]*think(?:ing)?\s*\/?>)\s*[.:：。,!！,，;；-]*\s*$/gim, "")
+    .replace(/^\s*(?:\/?\s*no[_\s-]*think(?:ing)?|<\s*no[_\s-]*think(?:ing)?\s*\/?>)\s*[.:：。,!！,，;；-]+\s*/i, "")
+    .replace(/^\s*\/?\s*no[_\s-]*think\s+(?=\S)/i, "")
     .replace(/```(?:json)?/gi, "")
     .replace(/```/g, "")
     .trim();
@@ -1474,8 +1508,10 @@ function shouldHoldLeadingControlPrefix(content) {
   const markers = [
     "/no_think",
     "/no think",
+    "/nothink",
     "no_think",
     "no think",
+    "nothink",
     "<no_think",
     "<no think",
     "<think",

@@ -47,7 +47,7 @@ p {
 
 .tabs {
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
+  grid-template-columns: repeat(6, 1fr);
   gap: 4px;
   margin-bottom: 12px;
   padding: 3px;
@@ -134,6 +134,22 @@ textarea {
   font-size: 13px;
 }
 
+.path-picker {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 64px;
+  gap: 7px;
+}
+
+.path-picker input {
+  min-width: 0;
+}
+
+.path-picker button {
+  min-height: 34px;
+  padding: 6px 8px;
+  font-size: 12px;
+}
+
 input:focus,
 select:focus,
 textarea:focus,
@@ -176,6 +192,10 @@ textarea {
 
 .actions.single {
   grid-template-columns: 1fr;
+}
+
+.actions.two {
+  grid-template-columns: 1fr 1fr;
 }
 
 .summary-card {
@@ -243,6 +263,15 @@ textarea {
   font-size: 0.92em;
 }
 
+.markdown-body a {
+  color: #1f6feb;
+  text-decoration: none;
+}
+
+.markdown-body a:hover {
+  text-decoration: underline;
+}
+
 .summary-result.compact {
   max-height: 132px;
 }
@@ -300,6 +329,17 @@ button:disabled {
   margin-top: 12px;
 }
 
+.local-qa-chat {
+  max-height: 176px;
+}
+
+.local-qa-status {
+  min-height: 18px;
+  color: #5b6676;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .ask-message {
   width: fit-content;
   max-width: 88%;
@@ -310,7 +350,6 @@ button:disabled {
   color: #344054;
   font-size: 13px;
   line-height: 1.5;
-  white-space: pre-wrap;
 }
 
 .ask-message.is-user {
@@ -328,6 +367,13 @@ button:disabled {
 
 .ask-message.is-pending {
   color: #667085;
+}
+
+.ask-message.is-pending .ask-message-body::after {
+  display: inline-block;
+  width: 1.4em;
+  content: "";
+  animation: thinkingDots 1.2s steps(4, end) infinite;
 }
 
 .ask-message-label {
@@ -372,4 +418,20 @@ button:disabled {
   min-height: 18px;
   margin-top: 10px;
   color: #344054;
+}
+
+@keyframes thinkingDots {
+  0% {
+    content: "";
+  }
+  25% {
+    content: ".";
+  }
+  50% {
+    content: "..";
+  }
+  75%,
+  100% {
+    content: "...";
+  }
 }

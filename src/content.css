@@ -12,27 +12,50 @@
   }
 }
 
-@keyframes pitCurtainGlow {
-  0%, 100% {
-    box-shadow:
-      0 0 0 1px color-mix(in srgb, #f8d77a 26%, transparent),
-      0 0 10px color-mix(in srgb, #f8d77a 22%, transparent);
+/* 星尘不再做整齐的上下跳动：每一段由 JS 分配不同的周期、相位和漂移距离，
+   让光点像不规则地呼吸、闪烁，而不是一组同步的 loading 图标。 */
+@keyframes pitStardustTwinkle {
+  0% {
+    opacity: 0;
+    background-position: 0 70%, 8px 18%, 3px 84%;
+    transform: translate3d(var(--pit-star-drift-x-start, -3px), var(--pit-star-drift-y-start, 2px), 0) scale(0.94);
   }
-  50% {
-    box-shadow:
-      0 0 0 1px color-mix(in srgb, #f8d77a 42%, transparent),
-      0 0 18px color-mix(in srgb, #f8d77a 34%, transparent);
+  18% {
+    opacity: var(--pit-star-peak-opacity, 0.78);
+  }
+  37% {
+    opacity: 0.3;
+  }
+  58% {
+    opacity: 0.66;
+    background-position: 13px 27%, 29px 68%, 18px 38%;
+    transform: translate3d(var(--pit-star-drift-x-mid, 2px), var(--pit-star-drift-y-mid, -2px), 0) scale(1.02);
+  }
+  76% {
+    opacity: 0.42;
+  }
+  100% {
+    opacity: 0;
+    background-position: 42px 5%, 66px 92%, 51px 46%;
+    transform: translate3d(var(--pit-star-drift-x-end, 6px), var(--pit-star-drift-y-end, -4px), 0) scale(0.97);
+  }
+}
+
+@keyframes pitRuneResolve {
+  0%, 22% {
+    opacity: 0;
+  }
+  100% {
+    opacity: 1;
   }
 }
 
 @keyframes pitCurtainReveal {
-  from {
-    clip-path: inset(0 0 100% 0);
-    filter: saturate(1.08) brightness(1.06);
+  0%, 22% {
+    opacity: 0;
   }
-  to {
-    clip-path: inset(0 0 0 0);
-    filter: saturate(1) brightness(1);
+  100% {
+    opacity: 1;
   }
 }
 
@@ -48,20 +71,111 @@
 }
 
 .pit-translation {
+  position: relative;
+  isolation: isolate;
   animation: pitFadeIn 0.35s cubic-bezier(0.16, 1, 0.3, 1) forwards;
   transition: opacity 0.3s ease, background-color 0.3s ease, border-color 0.3s ease;
   font-size: var(--pit-translation-font-size, 100%) !important;
   line-height: var(--pit-translation-line-height, 1.4) !important;
-  white-space: pre-wrap;
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+
+.pit-translation::before,
+.pit-translation::after,
+.pit-curtain-stage::before,
+.pit-curtain-stage::after {
+  position: absolute;
+  z-index: 1;
+  pointer-events: none;
+  content: "";
+}
+
+.pit-translation::before,
+.pit-curtain-stage::before {
+  inset: -0.55em -0.42em;
+  background:
+    radial-gradient(circle, #fef08a 0 1.8px, rgba(254, 240, 138, 0.32) 2.5px, transparent 3.5px) 4px 2px / 37px 31px,
+    radial-gradient(circle, #7dd3fc 0 1.45px, rgba(125, 211, 252, 0.28) 2.1px, transparent 3px) 13px 9px / 53px 41px,
+    radial-gradient(circle, #c4b5fd 0 1.3px, rgba(196, 181, 253, 0.28) 1.9px, transparent 2.8px) 1px 16px / 29px 47px;
+  filter: drop-shadow(0 0 3px rgba(250, 204, 21, 0.6));
+  border-radius: inherit;
+  opacity: 0;
+  will-change: transform, opacity, background-position;
+}
+
+.pit-translation::after,
+.pit-curtain-stage::after {
+  inset: -0.7em -0.55em;
+  border-radius: inherit;
+  content: "✦   ⋆     ✧  ·  ✦    ⋆  ✧     ·   ✦";
+  color: #fef08a !important;
+  font-size: 0.78em;
+  font-weight: 800;
+  letter-spacing: clamp(0.2em, 1.45vw, 0.82em);
+  line-height: 1.25;
+  text-align: center;
+  text-shadow:
+    0 0 7px rgba(250, 204, 21, 1),
+    0 0 13px rgba(250, 204, 21, 0.6),
+    0.8em 1.3em 0 #bae6fd,
+    -1.2em 1.8em 0 #ddd6fe,
+    2.1em -0.35em 0 #fef3c7,
+    -2.7em 0.65em 0 #bfdbfe;
+  background:
+    radial-gradient(circle, #fef3c7 0 1.35px, transparent 1.9px) 0 0 / 43px 29px,
+    radial-gradient(circle, #bfdbfe 0 1.05px, transparent 1.7px) 7px 4px / 61px 37px,
+    radial-gradient(circle, #ddd6fe 0 0.9px, transparent 1.5px) 2px 8px / 31px 47px;
+  opacity: 0;
+  will-change: transform, opacity, background-position;
+}
+
+/* 当前正在请求翻译的原文段落：保持轻盈，但让处理范围一眼可见。 */
+[data-pit-translating="true"] {
+  background: linear-gradient(105deg, rgba(254, 243, 199, 0.68), rgba(224, 242, 254, 0.56)) !important;
+  outline: 1px solid rgba(245, 158, 11, 0.32);
+  outline-offset: 2px;
+  border-radius: 4px;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+  transition: background-color 0.2s ease, outline-color 0.2s ease;
 }
 
 /* ── 翻译块：加载中状态 ── */
 .pit-translation[data-state="loading"] {
-  opacity: 0.45 !important;
+  min-height: 1.5em;
+  color: transparent !important;
+  opacity: 1 !important;
+  text-shadow: none !important;
 }
 
 .pit-translation[data-state="waiting"] {
-  opacity: 0.6 !important;
+  min-height: 1.5em;
+  color: transparent !important;
+  opacity: 1 !important;
+  text-shadow: none !important;
+}
+
+.pit-translation[data-state="loading"]::before,
+.pit-translation[data-state="waiting"]::before {
+  animation: pitStardustTwinkle var(--pit-stardust-before-duration, 1.9s) cubic-bezier(0.45, 0, 0.55, 1) var(--pit-stardust-before-delay, -0.52s) infinite;
+}
+
+.pit-translation[data-state="loading"]::after,
+.pit-translation[data-state="waiting"]::after {
+  animation: pitStardustTwinkle var(--pit-stardust-after-duration, 2.6s) cubic-bezier(0.45, 0, 0.55, 1) var(--pit-stardust-after-delay, -1.1s) infinite;
+}
+
+.pit-translation[data-state="done"] {
+  animation: pitRuneResolve 0.68s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.pit-translation[data-state="done"]::before {
+  animation: pitStardustTwinkle 0.72s ease-out -0.12s 1 both;
+}
+
+.pit-translation[data-state="done"]::after {
+  animation: pitStardustTwinkle 0.88s ease-out 1 both;
 }
 
 /* ══════════════════════════════════════
@@ -163,19 +277,49 @@
   font: inherit;
   font-size: var(--pit-translation-font-size, 100%) !important;
   line-height: var(--pit-translation-line-height, 1.4) !important;
-  white-space: pre-wrap;
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+
+.pit-translation br + br,
+.pit-replaced br + br {
+  line-height: 0.65;
 }
 
 .pit-curtain-stage {
   position: relative;
+  isolation: isolate;
   display: block;
   box-sizing: border-box;
   min-height: var(--pit-curtain-min-height, 1em);
   border-radius: 4px;
+  overflow: hidden;
 }
 
-.pit-curtain-stage:has(> .pit-replaced:not([data-state="done"])) {
-  animation: pitCurtainGlow 1.8s ease-in-out infinite;
+.pit-curtain-stage:has(> .pit-replaced:not([data-state="done"]):not([data-state="error"]))::before {
+  animation: pitStardustTwinkle var(--pit-stardust-before-duration, 1.9s) cubic-bezier(0.45, 0, 0.55, 1) var(--pit-stardust-before-delay, -0.52s) infinite;
+}
+
+.pit-curtain-stage:has(> .pit-replaced:not([data-state="done"]):not([data-state="error"]))::after {
+  animation: pitStardustTwinkle var(--pit-stardust-after-duration, 2.6s) cubic-bezier(0.45, 0, 0.55, 1) var(--pit-stardust-after-delay, -1.1s) infinite;
+}
+
+.pit-curtain-stage:has(> .pit-replaced[data-state="done"])::before {
+  animation: pitStardustTwinkle 0.72s ease-out -0.12s 1 both;
+}
+
+.pit-curtain-stage:has(> .pit-replaced[data-state="done"])::after {
+  animation: pitStardustTwinkle 0.88s ease-out 1 both;
+}
+
+.pit-curtain-stage:has(> .pit-replaced[data-state="done"]),
+.pit-curtain-stage:has(> .pit-replaced[data-state="error"]) {
+  min-height: 0;
+}
+
+.pit-curtain-stage > .pit-translation::before,
+.pit-curtain-stage > .pit-translation::after {
+  display: none;
 }
 
 .pit-curtain-original {
@@ -197,15 +341,36 @@
   inset: auto;
   opacity: 1 !important;
   pointer-events: auto;
-  animation: pitCurtainReveal 0.62s cubic-bezier(0.16, 1, 0.3, 1) both;
+  animation: pitCurtainReveal 0.72s cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
 .pit-curtain-stage:has(> .pit-replaced[data-state="done"]) > .pit-curtain-original,
 .pit-curtain-stage:has(> .pit-replaced[data-state="error"]) > .pit-curtain-original {
-  position: absolute;
-  inset: 0;
-  opacity: 0;
-  pointer-events: none;
+  display: none;
+}
+
+[data-pit-empty-paragraph="true"] {
+  display: none !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pit-translation,
+  .pit-translation::before,
+  .pit-translation::after,
+  .pit-curtain-stage,
+  .pit-curtain-stage::before,
+  .pit-curtain-stage::after,
+  .pit-curtain-stage > .pit-replaced[data-state="done"],
+  .pit-curtain-stage > .pit-replaced[data-state="error"] {
+    animation: none !important;
+    transition: none !important;
+  }
+
+  .pit-translation[data-state="loading"],
+  .pit-translation[data-state="waiting"] {
+    color: inherit !important;
+    opacity: 0.62 !important;
+  }
 }
 
 /* ── 页面内 PDF 抽取内容 ── */
@@ -300,7 +465,8 @@
   gap: 6px;
 }
 
-.pit-panel-save-all {
+.pit-panel-save-all,
+.pit-panel-mark-selection {
   min-height: 26px;
   padding: 4px 9px;
   border: 1px solid #c9d2df;
@@ -314,7 +480,26 @@
   line-height: 1.2;
 }
 
-.pit-panel-save-all:hover {
+.pit-panel-translate-header {
+  min-height: 26px;
+  padding: 4px 9px;
+  border: 0;
+  border-radius: 7px;
+  color: #fff;
+  background: #1f6feb;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 750;
+  line-height: 1.2;
+}
+
+.pit-panel-translate-header:hover {
+  background: #185abd;
+}
+
+.pit-panel-save-all:hover,
+.pit-panel-mark-selection:hover {
   background: #f8fafc;
 }
 
@@ -425,7 +610,7 @@
   color: #52606d;
   cursor: pointer;
   font: inherit;
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 700;
   line-height: 1.2;
 }
@@ -577,6 +762,93 @@
   align-items: center;
 }
 
+.pit-reader-settings-action {
+  margin: -2px 0 16px;
+}
+
+.pit-reader-section-title {
+  margin: 0 0 12px;
+  padding-top: 2px;
+  color: #182230;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 800;
+}
+
+.pit-reader-settings-action + .pit-reader-section-title {
+  padding-top: 14px;
+  border-top: 1px solid #e4e7ec;
+}
+
+.pit-local-qa-path {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.pit-local-qa-path input {
+  min-width: 0;
+}
+
+.pit-local-qa-path button {
+  min-height: 34px;
+  padding: 6px 9px;
+}
+
+.pit-local-qa-status {
+  min-height: 18px;
+  margin-top: 10px;
+  color: #667085;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.pit-local-qa-messages {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 180px;
+  overflow: auto;
+  margin-top: 12px;
+}
+
+.pit-local-qa-message {
+  width: fit-content;
+  max-width: 88%;
+  padding: 9px 10px;
+  border: 1px solid #d8dee8;
+  border-radius: 12px;
+  background: #fff;
+  color: #344054;
+}
+
+.pit-local-qa-message.is-user {
+  align-self: flex-end;
+  border-color: #b7d4ff;
+  background: #eef6ff;
+  color: #18345f;
+}
+
+.pit-local-qa-composer {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.pit-local-qa-input {
+  min-height: 34px;
+  box-sizing: border-box;
+  resize: vertical;
+  border: 1px solid #c9d2df;
+  border-radius: 8px;
+  padding: 7px 9px;
+  color: #182230;
+  background: #fff;
+  font: inherit;
+  line-height: 1.35;
+}
+
 .pit-reader-primary,
 .pit-reader-secondary {
   min-height: 34px;
@@ -673,6 +945,10 @@
   flex-direction: column;
   gap: 8px;
   padding: 12px;
+}
+
+.pit-ask-search-toggle {
+  margin: 0 12px 10px;
 }
 
 .pit-ask-message {
@@ -974,6 +1250,11 @@
   display: none !important;
 }
 
+/* Empty add buttons require Command + hover; keep an active editor usable. */
+.pit-mark-note-composer.is-hover-note:not(.has-content):not(.has-note):not(.is-add-trigger-enabled):not(:focus-within) {
+  display: none !important;
+}
+
 .pit-mark-note-label {
   display: none;
 }
@@ -1050,7 +1331,7 @@
 
 .pit-mark-note-composer.is-hover-note .pit-mark-note-label {
   position: absolute;
-  inset: -9px;
+  inset: -14px;
   z-index: 2;
   display: block;
   min-width: 0;
@@ -1113,7 +1394,7 @@
   position: absolute;
   z-index: 1;
   top: 50%;
-  left: calc(100% + 8px);
+  left: calc(100% + 4px);
   display: block;
   width: min(310px, calc(100vw - 32px));
   max-height: min(340px, 48vh);
@@ -1136,7 +1417,7 @@
 }
 
 .pit-mark-note-composer.is-hover-note.opens-below .pit-mark-note-field {
-  top: calc(100% + 8px);
+  top: calc(100% + 4px);
   right: 0;
   left: auto;
   transform: translateY(-4px) scale(0.98);
@@ -1146,7 +1427,7 @@
 .pit-mark-note-composer.is-hover-note.opens-below.opens-above .pit-mark-note-field {
   top: auto;
   right: 0;
-  bottom: calc(100% + 8px);
+  bottom: calc(100% + 4px);
   left: auto;
   transform: translateY(4px) scale(0.98);
   transform-origin: right bottom;

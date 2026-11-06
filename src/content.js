@@ -13,12 +13,16 @@ const PDF_SECTION_CLASS   = "pit-pdf-content";
 const PDF_BLOCK_CLASS     = "pit-pdf-block";
 const ORIGINAL_HTML_ATTR  = "data-pit-original-html";
 const PROCESSED_ATTR      = "data-pit-processed";
+const EMPTY_PARAGRAPH_ATTR = "data-pit-empty-paragraph";
 const PDF_SOURCE_ATTR     = "data-pit-pdf-source";
 const MAX_BLOCKS_PER_RUN  = 500;
 const MAX_PDFS_PER_PAGE   = 3;
 const MAX_PDF_PARAGRAPHS_PER_FILE = 120;
 const TRANSLATION_CHUNK_LENGTH = 600;
 const SHORT_TEXT_REPLACE_MAX_WORDS = 4;
+const MISSING_TRANSLATION_MIN_WORDS = 10;
+const MAX_TRANSLATION_ATTEMPTS = 3;
+const MAX_MISSING_TRANSLATION_PASSES = 5;
 const PROTECTED_INLINE_TOKEN_PATTERN = /(?<![\p{L}\p{N}_])(?:[@#][\p{L}\p{N}_][\p{L}\p{N}_.-]{0,63}|\$[A-Za-z][A-Za-z0-9._-]{0,15}|[A-Z]{2,8}\/[A-Z]{2,8}|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})(?![\p{L}\p{N}_])/gu;
 const COMMON_UNTRANSLATED_TERM_PATTERN = /\b(?:ETF|ETFs|SPY|QQQ|DIA|IWM|VIX|CPI|PCE|FOMC|Fed|GDP|CME|NYSE|NASDAQ|IPO|EPS|PE|P\/E|AI|API|GPU|CPU|LLM|SaaS|BTC|ETH|SOL|USDT|USDC|DeFi|NFT|Bearish|Bullish|Triple\s+Witching)\b/giu;
 const CACHE_PREFIX        = "pit_cache_";
@@ -40,6 +44,7 @@ const OLLAMA_PARA_TIMEOUT_MS     = 22000;  // 单段最长 22s；2s 内用等待
 
 const DEFAULT_OLLAMA = {
   provider: "ollama",
+  providerConfigs: {},
   model:    "qwen3.5:4b",
   baseUrl:  "http://localhost:11434",
   markStyle: "highlight",
@@ -50,7 +55,11 @@ const DEFAULT_OLLAMA = {
   translationLineHeight: 1.4,
   noteSaveShortcut: "enter",
   shortTextReplaceMode: false,
-  autoOpenPanel: false
+  autoOpenPanel: false,
+  summaryPrompt: "",
+  allowWebSearch: true,
+  localQaUrl: "http://localhost:3218",
+  localQaNotesDir: ""
 };
 
 const BLOCK_SELECTOR = [
@@ -103,6 +112,7 @@ const CONTENT_NOISE_SELECTOR = [
 
 // paraId → { node, renderer, originalText }
 const streamingNodes = new Map();
+let translationAttemptCounts = new WeakMap();
 let lastArticleSnapshot = null;
 let lastSummaryText = "";
 let lastNoteTitle = "";
@@ -110,6 +120,8 @@ let lastOriginalSummary = "";
 let originalSummaryPromise = null;
 let lastSeenUrl = location.href;
 let lastMousePoint = { x: 0, y: 0 };
+let hoverNoteCommandPressed = false;
+let hasHoverNotePointer = false;
 let lastDetectedPageTheme = "";
 let lastPageSelection = null;
 let lastKnownSettings = { ...DEFAULT_OLLAMA };
@@ -120,6 +132,8 @@ let hoverNoteHideTimer = null;
 let hoverNoteShowTimer = null;
 let hoverNotePositionFrame = 0;
 let hoverNoteComposers = new Map();
+const HOVER_NOTE_HIDE_DELAY_MS = 1100;
+const HOVER_NOTE_SHOW_DELAY_MS = 100;
 const hoverNoteResizeObserver = typeof ResizeObserver === "function"
   ? new ResizeObserver(() => scheduleHoverNotePositionSync())
   : null;
@@ -156,7 +170,8 @@ document.addEventListener("mouseup", (event) => {
 });
 
 document.addEventListener("selectionchange", () => {
-  setTimeout(capturePageSelectionSnapshot, 0);
+  capturePageSelectionSnapshot();
+  showSelectionToolbar();
 });
 
 document.addEventListener("contextmenu", () => {
@@ -169,6 +184,22 @@ document.addEventListener("mousedown", (event) => {
 
 document.addEventListener("pointerover", handleHoverNotePointerOver);
 document.addEventListener("pointerout", handleHoverNotePointerOut);
+document.addEventListener("pointermove", (event) => {
+  if (event.pointerType === "touch") return;
+  lastMousePoint = { x: event.clientX, y: event.clientY };
+  hasHoverNotePointer = true;
+  // Track the pointer for Command presses without scanning blocks on every move.
+  if (event.metaKey || hoverNoteCommandPressed) handleHoverNotePointerOver(event);
+});
+document.addEventListener("keydown", handleHoverNoteModifierChange);
+document.addEventListener("keyup", handleHoverNoteModifierChange);
+window.addEventListener("blur", () => {
+  hoverNoteCommandPressed = false;
+  hasHoverNotePointer = false;
+  syncHoverNoteAddTriggers(null);
+  cancelHoverNoteShow();
+  hideSelectionToolbar();
+});
 window.addEventListener("scroll", scheduleHoverNotePositionSync, true);
 window.addEventListener("resize", scheduleHoverNotePositionSync);
 
@@ -258,7 +289,9 @@ async function translatePage(settings) {
   prewarmOllamaForSettings(settings);
 
   restorePage();
+  hideEmptyParagraphs();
   streamingNodes.clear();
+  translationAttemptCounts = new WeakMap();
 
   const pdfResult = await ensurePdfContentSections();
   const allBlocks = collectBlocks();
@@ -288,15 +321,18 @@ async function translatePage(settings) {
     insertTranslationNode(block, translation, render.mode, render.style, settings);
   }
 
+  const finishTranslationRun = async () => {
+    await auditAndTranslateMissingBlocks(settings, run, style);
+    if (!run.cancelled) startOverviewAfterTranslation();
+  };
+
   // 未缓存 → 后台队列翻译。只在段落真正开始翻译时插入 DOM，避免大页面一次性重排。
   if (uncachedBlocks.length > 0) {
     streamAll(uncachedBlocks, settings, run, style)
-      .then(() => {
-        if (!run.cancelled) startOverviewAfterTranslation();
-      })
+      .then(finishTranslationRun)
       .catch(console.error);
   } else {
-    startOverviewAfterTranslation();
+    finishTranslationRun().catch(console.error);
   }
 
   return {
@@ -323,7 +359,7 @@ function cancelRun(run) {
 // ─── 首屏优先流式翻译队列 ─────────────────────────────────────
 async function streamAll(blocks, settings, run, style) {
   const resolved = { ...DEFAULT_OLLAMA, ...settings };
-  const concurrency = resolved.provider === "openaiCompatible" ? ONLINE_CONCURRENCY : OLLAMA_CONCURRENCY;
+  const concurrency = resolved.provider !== "ollama" ? ONLINE_CONCURRENCY : OLLAMA_CONCURRENCY;
   let cursor = 0;
 
   await Promise.all(Array.from({ length: concurrency }, async () => {
@@ -336,15 +372,91 @@ async function streamAll(blocks, settings, run, style) {
   }));
 }
 
+async function auditAndTranslateMissingBlocks(settings, run, style) {
+  for (let pass = 0; pass < MAX_MISSING_TRANSLATION_PASSES && !run.cancelled; pass += 1) {
+    const missingBlocks = collectMissingLongBlocks()
+      .filter((block) => (translationAttemptCounts.get(block.element) || 0) < MAX_TRANSLATION_ATTEMPTS)
+      .slice(0, MAX_BLOCKS_PER_RUN);
+
+    if (!missingBlocks.length) return;
+    console.info(`[PIT] 漏译检查第 ${pass + 1} 轮：补译 ${missingBlocks.length} 个长段落`);
+    await streamAll(prioritizeBlocksByViewport(missingBlocks), settings, run, style);
+  }
+}
+
+function collectMissingLongBlocks() {
+  const root = findBestArticleContentRoot() || document.body;
+  if (!(root instanceof Element)) return [];
+
+  const selector = "p, li, blockquote, figcaption, dd, dt, td, th, h1, h2, h3, h4, h5, h6, div[lang], [role='paragraph'], [data-testid='tweetText']";
+  const candidates = Array.from(root.querySelectorAll(selector));
+  if (root.matches?.(selector)) candidates.unshift(root);
+
+  return removeOverlappingCandidateBlocks(candidates)
+    .filter((element) => element instanceof HTMLElement && !element.closest(SKIP_SELECTOR))
+    .filter((element) => isVisible(element) || hasVisibleTextRange(element))
+    .filter((element) => !hasValidCompletedTranslation(element))
+    .map((element) => {
+      restoreStaleReplacementBeforeRetry(element);
+      return {
+        element,
+        text: extractBlockText(element),
+        hasFormat: hasFormatting(element)
+      };
+    })
+    .filter((block) => {
+      const words = normalizeText(block.text).match(/[A-Za-z]+(?:[-'][A-Za-z]+)*/g) || [];
+      return words.length > MISSING_TRANSLATION_MIN_WORDS
+        && shouldTranslateToSimplifiedChinese(block.text);
+    });
+}
+
+function hasValidCompletedTranslation(element) {
+  const sourceText = extractOriginalTextForBundle(element);
+  const candidates = [
+    element.querySelector(`:scope > .${TRANSLATION_CLASS}[data-state="done"], :scope .${REPLACED_CLASS}[data-state="done"]`),
+    element.nextElementSibling?.matches?.(`.${TRANSLATION_CLASS}[data-state="done"]`)
+      ? element.nextElementSibling
+      : null
+  ].filter(Boolean);
+
+  return candidates.some((node) => (
+    isUsableTranslationResult(sourceText, node.innerText || node.textContent || "")
+  ));
+}
+
+function restoreStaleReplacementBeforeRetry(element) {
+  if (element.hasAttribute(ORIGINAL_HTML_ATTR)) {
+    element.innerHTML = element.getAttribute(ORIGINAL_HTML_ATTR) || "";
+    element.removeAttribute(ORIGINAL_HTML_ATTR);
+  }
+  element.removeAttribute(PROCESSED_ATTR);
+  removeExistingTranslationFromBlock(element);
+}
+
+function prioritizeBlocksByViewport(blocks) {
+  return [...blocks].sort((left, right) => {
+    const leftVisible = isInViewport(left.element) ? 0 : 1;
+    const rightVisible = isInViewport(right.element) ? 0 : 1;
+    return leftVisible - rightVisible;
+  });
+}
+
 async function streamBlock(block, settings, run, style) {
   if (run.cancelled || isAlreadyHandledBlock(block.element)) return;
+  const attempts = translationAttemptCounts.get(block.element) || 0;
+  if (attempts >= MAX_TRANSLATION_ATTEMPTS) return;
+  translationAttemptCounts.set(block.element, attempts + 1);
 
   const paraId = `pit_${Date.now()}_${Math.random().toString(36).slice(2)}`;
   const render = resolveTranslationRender(block, settings, style);
+  // 标出当前正在请求的原文，避免用户在并行翻译时失去上下文。
+  block.element.setAttribute("data-pit-translating", "true");
   const node = createStreamingTarget(block, render.mode, render.style, settings);
   const renderer = createStreamRenderer(node, block.hasFormat);
   const protectedSource = protectInlineTokens(protectLinks(block.text));
   let gotFirstToken = false;
+  let completedTranslation = "";
 
   streamingNodes.set(paraId, { node, renderer, originalText: block.text });
 
@@ -360,9 +472,12 @@ async function streamBlock(block, settings, run, style) {
       if (run.cancelled) return;
       if (textChunk.text) {
         if (isProtectedPlaceholderOnly(textChunk.text)) {
-          renderer.append(restoreInlineTokens(textChunk.text, protectedSource));
+          const restoredChunk = restoreInlineTokens(textChunk.text, protectedSource);
+          renderer.append(restoredChunk);
+          completedTranslation += restoredChunk;
         } else {
-          await streamOneParagraph(textChunk.text, settings, (chunk) => {
+          const beforeChunk = renderer.getText();
+          const completedChunk = await streamOneParagraph(textChunk.text, settings, (chunk) => {
             if (run.cancelled) return;
             if (!gotFirstToken) {
               gotFirstToken = true;
@@ -371,27 +486,45 @@ async function streamBlock(block, settings, run, style) {
             }
             renderer.append(restoreInlineTokens(chunk, protectedSource));
           }, run);
+          const restoredCompletedChunk = restoreInlineTokens(completedChunk, protectedSource);
+          appendMissingStreamResult(renderer, beforeChunk, restoredCompletedChunk);
+          completedTranslation += restoredCompletedChunk;
         }
       }
       if (textChunk.separator) {
         renderer.append(textChunk.separator);
+        completedTranslation += textChunk.separator;
       }
     }
 
     if (run.cancelled) return;
-    const finalText = restoreInlineTokens(renderer.getText(), protectedSource);
-    node.dataset.state = "done";
+    const finalText = formatTranslationResult(completedTranslation || restoreInlineTokens(renderer.getText(), protectedSource));
+    if (!isUsableTranslationResult(block.text, finalText)) {
+      throw new Error("模型没有返回有效的中文译文");
+    }
     renderer.finish(finalText);
+    if (!isRenderedTranslationUsable(node, block.text)) {
+      throw new Error("译文没有成功写入页面");
+    }
+    node.dataset.state = "done";
     if (block.text && finalText) setCacheEntry(block.text, finalText);
   } catch (err) {
     if (!run.cancelled) {
       console.warn("[PIT] translation failed", err);
-      node.dataset.state = "error";
-      renderer.finish(renderer.getText() || humanizeStreamError(err, settings));
+      if (!restoreOriginalBlockAfterFailedReplacement(block, node)) {
+        node.dataset.state = "error";
+        const partialText = renderer.getText();
+        renderer.finish(
+          partialText && !hasUnresolvedProtectedPlaceholder(partialText)
+            ? partialText
+            : humanizeStreamError(err, settings)
+        );
+      }
     }
   } finally {
     clearTimeout(firstTokenTimer);
     streamingNodes.delete(paraId);
+    block.element.removeAttribute("data-pit-translating");
   }
 }
 
@@ -458,8 +591,29 @@ function createStreamingNode(style, settings = {}, sourceElement = null) {
   node.className        = TRANSLATION_CLASS;
   node.dataset.state    = "loading";
   node.dataset.pitStyle = style;
+  applyStardustMotion(node);
   applyTranslationTypography(node, settings, sourceElement);
   return node;
+}
+
+function applyStardustMotion(element, motion = null) {
+  const random = (min, max, decimals = 2) => Number((min + Math.random() * (max - min)).toFixed(decimals));
+  const values = motion || {
+    "--pit-stardust-before-duration": `${random(1.7, 2.8)}s`,
+    "--pit-stardust-after-duration": `${random(2.3, 3.9)}s`,
+    "--pit-stardust-before-delay": `${random(-2.8, -0.1)}s`,
+    "--pit-stardust-after-delay": `${random(-3.8, -0.2)}s`,
+    "--pit-star-drift-x-start": `${random(-5, -1)}px`,
+    "--pit-star-drift-y-start": `${random(1, 4)}px`,
+    "--pit-star-drift-x-mid": `${random(-1, 4)}px`,
+    "--pit-star-drift-y-mid": `${random(-3, 1)}px`,
+    "--pit-star-drift-x-end": `${random(3, 8)}px`,
+    "--pit-star-drift-y-end": `${random(-6, -2)}px`,
+    "--pit-star-peak-opacity": `${random(0.62, 0.86)}`
+  };
+
+  Object.entries(values).forEach(([name, value]) => element.style.setProperty(name, value));
+  return values;
 }
 
 function createStreamingTarget(block, mode, style, settings = {}) {
@@ -503,7 +657,7 @@ function createStreamRenderer(node, hasFormat) {
       scheduleRender();
     },
     finish(finalText) {
-      buffer = stripStreamedText(finalText || buffer);
+      buffer = formatTranslationResult(finalText || buffer);
       render();
     },
     getText() {
@@ -512,19 +666,63 @@ function createStreamRenderer(node, hasFormat) {
   };
 }
 
+function appendMissingStreamResult(renderer, beforeChunk, completedChunk) {
+  const completed = formatTranslationResult(completedChunk);
+  if (!completed) return;
+
+  const before = String(beforeChunk || "");
+  const after = renderer.getText();
+  const streamedChunk = after.startsWith(before) ? after.slice(before.length).trimStart() : "";
+  if (!streamedChunk) {
+    renderer.append(completed);
+  } else if (completed.startsWith(streamedChunk)) {
+    renderer.append(completed.slice(streamedChunk.length));
+  }
+}
+
+function isUsableTranslationResult(sourceText, translatedText) {
+  const source = normalizeText(sourceText);
+  const translated = normalizeText(translatedText);
+  if (!translated || translated === source || hasUnresolvedProtectedPlaceholder(translated)) return false;
+
+  const sourceLatinLetters = source.match(/[A-Za-z]/g)?.length || 0;
+  const sourceCjk = source.match(/[\u3400-\u9fff]/g)?.length || 0;
+  if (sourceLatinLetters >= 20 && sourceCjk === 0) {
+    return (translated.match(/[\u3400-\u9fff]/g)?.length || 0) >= 2;
+  }
+  return true;
+}
+
+function isRenderedTranslationUsable(node, sourceText) {
+  if (!(node instanceof HTMLElement) || !node.isConnected) return false;
+  return isUsableTranslationResult(sourceText, node.innerText || node.textContent || "");
+}
+
+function restoreOriginalBlockAfterFailedReplacement(block, translationNode) {
+  if (!translationNode?.classList?.contains(REPLACED_CLASS)) return false;
+  const element = block?.element;
+  if (!(element instanceof HTMLElement) || !element.hasAttribute(ORIGINAL_HTML_ATTR)) return false;
+  element.innerHTML = element.getAttribute(ORIGINAL_HTML_ATTR) || "";
+  element.removeAttribute(ORIGINAL_HTML_ATTR);
+  element.removeAttribute(PROCESSED_ATTR);
+  return true;
+}
+
 function insertTranslationNode(block, translation, mode, style, settings = {}) {
   if (isAlreadyHandledBlock(block.element)) return;
+  const formattedTranslation = formatTranslationResult(translation);
+  if (!isUsableTranslationResult(block.text, formattedTranslation)) return;
   removeExistingTranslationFromBlock(block.element);
   if (mode === "replace") {
-    const node = replaceBlock(block, translation);
+    const node = replaceBlock(block, formattedTranslation);
     applyTranslationTypography(node, settings, block.element);
   } else {
     const node = createStreamingNode(style, settings, block.element);
     node.dataset.state = "done";
     if (block.hasFormat) {
-      node.innerHTML = markdownToHtml(translation);
+      node.innerHTML = markdownToHtml(formattedTranslation);
     } else {
-      node.textContent = translation;
+      node.textContent = formattedTranslation;
     }
     placeTranslationNode(block.element, node);
   }
@@ -594,6 +792,12 @@ function createCurtainReplaceTarget(block, translationNode) {
 
   const stage = document.createElement("span");
   stage.className = "pit-curtain-stage";
+  // 替换模式的星尘由舞台承载；沿用这一次翻译的随机节奏，避免两种模式观感不同。
+  applyStardustMotion(stage, Object.fromEntries(
+    Array.from(translationNode.style)
+      .filter((name) => name.startsWith("--pit-star"))
+      .map((name) => [name, translationNode.style.getPropertyValue(name)])
+  ));
   stage.style.setProperty("--pit-curtain-min-height", `${Math.max(1, Math.ceil(el.getBoundingClientRect().height))}px`);
   stage.append(original, translationNode);
   el.replaceChildren(stage);
@@ -602,10 +806,17 @@ function createCurtainReplaceTarget(block, translationNode) {
 function protectLinks(text) {
   const links = [];
   const source = String(text || "");
-  const protectedText = source.replace(/\[[^\]]+\]\([^)]+\)|https?:\/\/[^\s<>"')]+|www\.[^\s<>"')]+/gi, (match) => {
+  const protectedText = source.replace(/\[([^\]]+)\]\(([^)]+)\)|https?:\/\/[^\s<>"')]+|www\.[^\s<>"')]+/gi, (match, label, destination) => {
     const token = `PITLINK${links.length}`;
-    links.push(match);
-    return token;
+    // Markdown 链接只保护地址，链接文字仍应交给模型翻译。
+    // 之前把整个 [label](url) 替换成占位符，会直接造成链接文字漏译。
+    if (label !== undefined && destination !== undefined) {
+      links.push(destination);
+      return `[${label}](${token})`;
+    }
+    const trailingPunctuation = match.match(/[.,!?;:。！？；：]+$/)?.[0] || "";
+    links.push(trailingPunctuation ? match.slice(0, -trailingPunctuation.length) : match);
+    return `${token}${trailingPunctuation}`;
   });
   return { text: protectedText, links };
 }
@@ -632,25 +843,55 @@ function protectInlineTokens(protection) {
 }
 
 function restoreProtectedLinks(text, links = []) {
-  return String(text || "").replace(/PIT\s*LINK\s*(\d+)|PITLINK(\d+)/gi, (match, spacedIndex, compactIndex) => {
-    const index = Number(spacedIndex || compactIndex);
-    return links[index] || match;
+  let fallbackIndex = 0;
+  const usedIndexes = new Set();
+  return String(text || "").replace(/PIT[\s_`*－-]*LINK(?:[\s_`*:：#＃－-]*([0-9０-９]+))?/gi, (match, rawIndex) => {
+    const index = rawIndex === undefined
+      ? nextUnusedProtectionIndex(usedIndexes, fallbackIndex)
+      : Number(toAsciiDigits(rawIndex));
+    const restored = links[index];
+    if (!restored) return match;
+    usedIndexes.add(index);
+    fallbackIndex = Math.max(fallbackIndex, index + 1);
+    return restored;
   });
 }
 
 function restoreInlineTokens(text, protection = {}) {
-  const withTokens = String(text || "").replace(/PIT\s*TOKEN\s*(\d+)|PITTOKEN(\d+)/gi, (match, spacedIndex, compactIndex) => {
-    const index = Number(spacedIndex || compactIndex);
-    return protection.tokens?.[index] || match;
+  let fallbackIndex = 0;
+  const usedIndexes = new Set();
+  const withTokens = String(text || "").replace(/PIT[\s_`*－-]*TOKEN(?:[\s_`*:：#＃－-]*([0-9０-９]+))?/gi, (match, rawIndex) => {
+    const index = rawIndex === undefined
+      ? nextUnusedProtectionIndex(usedIndexes, fallbackIndex)
+      : Number(toAsciiDigits(rawIndex));
+    const restored = protection.tokens?.[index];
+    if (!restored) return match;
+    usedIndexes.add(index);
+    fallbackIndex = Math.max(fallbackIndex, index + 1);
+    return restored;
   });
   return restoreProtectedLinks(withTokens, protection.links);
+}
+
+function nextUnusedProtectionIndex(usedIndexes, startIndex = 0) {
+  let index = startIndex;
+  while (usedIndexes.has(index)) index += 1;
+  return index;
+}
+
+function toAsciiDigits(value) {
+  return String(value || "").replace(/[０-９]/g, (digit) => String(digit.charCodeAt(0) - 0xFF10));
+}
+
+function hasUnresolvedProtectedPlaceholder(text) {
+  return /PIT[\s_`*－-]*(?:LINK|TOKEN)(?:[\s_`*:：#＃－-]*[0-9０-９]+)?/i.test(String(text || ""));
 }
 
 function isProtectedPlaceholderOnly(text) {
   const value = String(text || "").trim();
   if (!value) return false;
   const stripped = value
-    .replace(/(?:PIT\s*TOKEN\s*\d+|PITTOKEN\d+|PIT\s*LINK\s*\d+|PITLINK\d+)/gi, "")
+    .replace(/PIT[\s_`*－-]*(?:TOKEN|LINK)[\s_`*:：#＃－-]*[0-9０-９]+/gi, "")
     .replace(/\s+/g, "")
     .trim();
   return stripped === "";
@@ -706,7 +947,27 @@ function restorePage() {
   document.querySelectorAll(`[${PROCESSED_ATTR}]`).forEach((el) => {
     el.removeAttribute(PROCESSED_ATTR);
   });
+  document.querySelectorAll(`[${EMPTY_PARAGRAPH_ATTR}]`).forEach((el) => {
+    el.removeAttribute(EMPTY_PARAGRAPH_ATTR);
+  });
   lastSummaryText = "";
+}
+
+function hideEmptyParagraphs(root = document.body) {
+  if (!(root instanceof Element)) return;
+  root.querySelectorAll("p").forEach((paragraph) => {
+    if (paragraph.closest(SKIP_SELECTOR) || !isEmptyParagraph(paragraph)) return;
+    paragraph.setAttribute(EMPTY_PARAGRAPH_ATTR, "true");
+  });
+}
+
+function isEmptyParagraph(paragraph) {
+  if (!(paragraph instanceof HTMLParagraphElement)) return false;
+  if (paragraph.querySelector("img, picture, svg, video, audio, iframe, canvas, object, embed, input, textarea, select, button, hr, math")) {
+    return false;
+  }
+  return String(paragraph.textContent || "")
+    .replace(/[\s\u00A0\u200B-\u200D\u2060\uFEFF]/g, "") === "";
 }
 
 function removeExistingTranslationFromBlock(element) {
@@ -821,16 +1082,70 @@ function getAskMarkdown(panel) {
 }
 
 // ─── 页面内阅读助手面板 ───────────────────────────────────────
+function getReaderPanels() {
+  return Array.from(document.querySelectorAll(`.${ASK_PANEL_CLASS}`))
+    .filter((node) => node instanceof HTMLElement);
+}
+
+function getActiveReaderPanel() {
+  const panels = getReaderPanels();
+  if (!panels.length) return null;
+  return panels.find((panel) => panel.dataset.pageUrl === location.href && panel.hidden !== true)
+    || panels.find((panel) => panel.dataset.pageUrl === location.href)
+    || panels.find((panel) => panel.hidden !== true)
+    || panels[0];
+}
+
+function mergePanelNotes(targetPanel, sourcePanel) {
+  if (!(targetPanel instanceof HTMLElement) || !(sourcePanel instanceof HTMLElement) || targetPanel === sourcePanel) return;
+  const targetInput = targetPanel.querySelector(".pit-panel-note");
+  const sourceInput = sourcePanel.querySelector(".pit-panel-note");
+  if (!targetInput || !sourceInput) return;
+  const targetNote = String(targetInput.value || "").trim();
+  const sourceNote = String(sourceInput.value || "").trim();
+  if (!sourceNote || targetNote.includes(sourceNote)) return;
+  if (!targetNote) {
+    targetInput.value = `${sourceNote}\n`;
+  } else {
+    targetInput.value = `${targetNote}\n\n${sourceNote}\n`;
+  }
+  persistNoteDraft(targetPanel);
+}
+
+function normalizeReaderPanelSingleton(preferredPanel = null) {
+  const panels = getReaderPanels();
+  if (!panels.length) return null;
+  const currentPagePanels = panels.filter((panel) => panel.dataset.pageUrl === location.href);
+  const candidates = currentPagePanels.length ? currentPagePanels : panels;
+  const survivor = preferredPanel && candidates.includes(preferredPanel)
+    ? preferredPanel
+    : candidates.find((panel) => panel.hidden !== true) || candidates[0];
+
+  for (const panel of panels) {
+    if (panel === survivor) continue;
+    if (!panel.dataset.pageUrl || panel.dataset.pageUrl === location.href) {
+      mergePanelNotes(survivor, panel);
+    }
+    panel.remove();
+  }
+
+  if (!survivor.dataset.pageUrl || survivor.dataset.pageUrl === location.href) {
+    survivor.dataset.pageUrl = location.href;
+  }
+  return survivor;
+}
+
 function openAskPanel(settings = {}, options = {}) {
   const resolvedSettings = { ...DEFAULT_OLLAMA, ...lastKnownSettings, ...settings };
   lastKnownSettings = resolvedSettings;
   const shouldShow = options.visible !== false;
-  let panel = document.querySelector(`.${ASK_PANEL_CLASS}`);
+  let panel = normalizeReaderPanelSingleton(getActiveReaderPanel());
   if (panel) {
     if (panel.dataset.pageUrl !== location.href) {
       panel.remove();
       panel = null;
     } else {
+      panel = normalizeReaderPanelSingleton(panel) || panel;
       applyExternalSettingsToPanel(panel, resolvedSettings);
       if (shouldShow) panel.hidden = false;
       return panel;
@@ -845,27 +1160,36 @@ function openAskPanel(settings = {}, options = {}) {
   panel.innerHTML = [
     '<div class="pit-reader-header">',
     '<div><strong>页面阅读助手</strong></div>',
-    '<div class="pit-reader-header-actions"><button class="pit-panel-save-all" type="button" title="保存 Markdown" aria-label="保存 Markdown">保存</button>',
+    '<div class="pit-reader-header-actions"><button class="pit-panel-translate pit-panel-translate-header" type="button" title="翻译当前页面" aria-label="翻译当前页面">翻译</button>',
+    '<button class="pit-panel-mark-selection" type="button" title="标记当前选中内容" aria-label="标记当前选中内容">标记</button>',
+    '<button class="pit-panel-save-all" type="button" title="保存 Markdown" aria-label="保存 Markdown">保存</button>',
     '<button class="pit-ask-close" type="button" aria-label="关闭">×</button>',
     '</div>',
     '</div>',
     '<nav class="pit-reader-tabs" aria-label="功能">',
-    '<button class="pit-reader-tab is-active" data-reader-tab="translate" type="button">🌐 翻译</button>',
+    '<button class="pit-reader-tab is-active" data-reader-tab="notes" type="button">✎ 笔记</button>',
     '<button class="pit-reader-tab" data-reader-tab="ask" type="button">💬 Ask</button>',
+    '<button class="pit-reader-tab" data-reader-tab="localQa" type="button">📚 问笔记</button>',
     '<button class="pit-reader-tab" data-reader-tab="tweet" type="button">✍️ 发帖</button>',
-    '<button class="pit-reader-tab" data-reader-tab="notes" type="button">✎ 笔记</button>',
     '<button class="pit-reader-tab" data-reader-tab="settings" type="button">⚙️ 设置</button>',
     '</nav>',
     '<section class="pit-reader-body">',
-    '<div class="pit-reader-panel-section is-active" data-reader-panel="translate">',
-    '<label class="pit-reader-field"><span>翻译模式</span><select class="pit-panel-mode"><option value="append">段落下方增加中文</option><option value="replace">替换原文</option></select></label>',
-    '<label class="pit-reader-field"><span>译文样式</span><select class="pit-panel-style"><option value="none">无</option><option value="bar">左侧竖线</option><option value="dashed-box">虚线方框</option><option value="highlight">浅色高亮</option><option value="top-line">顶部细线</option><option value="bubble">圆角气泡</option></select></label>',
-    '<label class="pit-reader-toggle"><input class="pit-panel-short-replace" type="checkbox"> 短句自动替换原文</label>',
-    '<div class="pit-reader-actions"><button class="pit-reader-primary pit-panel-translate" type="button">翻译当前页面</button><button class="pit-reader-secondary pit-panel-restore" type="button">恢复原文</button></div>',
+    '<div class="pit-reader-panel-section is-active" data-reader-panel="notes">',
+    '<div class="pit-reader-field pit-note-field"><span>我的笔记 · Markdown</span><div class="pit-note-editor"><textarea class="pit-panel-note" rows="10" spellcheck="false" placeholder="支持 Markdown：# 标题、- 要点、**重点**、`代码`、[链接](url)"></textarea><div class="pit-note-render markdown-body" hidden></div></div></div>',
+    '<div class="pit-reader-checks"><label><input class="pit-save-url" type="checkbox" checked> 原始链接</label><label><input class="pit-save-original" type="checkbox" checked> 网页英文</label><label><input class="pit-save-translation" type="checkbox" checked> 中文翻译</label><label><input class="pit-save-ask" type="checkbox" checked> Ask 内容</label><label><input class="pit-save-note" type="checkbox" checked> 我的笔记</label></div>',
     '</div>',
     '<div class="pit-reader-panel-section" data-reader-panel="ask">',
     `<section class="pit-ask-overview markdown-body">${isXPage() ? "正在总结 X 内容..." : "正在读取文章脉络..."}</section>`,
     '<section class="pit-ask-messages" aria-label="对话"></section>',
+    '<label class="pit-reader-toggle pit-ask-search-toggle"><input class="pit-panel-allow-web-search" type="checkbox"> 文章不足时允许联网搜索</label>',
+    '</div>',
+    '<div class="pit-reader-panel-section" data-reader-panel="localQa">',
+    '<label class="pit-reader-field"><span>本地问答服务</span><input class="pit-panel-local-qa-url" placeholder="http://localhost:3218"></label>',
+    '<label class="pit-reader-field"><span>Markdown 笔记目录</span><div class="pit-local-qa-path"><input class="pit-panel-local-qa-dir" placeholder="点击选择目录"><button class="pit-reader-secondary pit-panel-local-qa-pick" type="button">选择</button></div></label>',
+    '<div class="pit-reader-actions"><button class="pit-reader-secondary pit-panel-local-qa-open" type="button">打开网页</button><button class="pit-reader-secondary pit-panel-local-qa-index" type="button">重新索引</button></div>',
+    '<div class="pit-local-qa-status">打开本地服务后可连接。</div>',
+    '<section class="pit-local-qa-messages" aria-label="本地笔记问答记录"></section>',
+    '<div class="pit-local-qa-composer"><textarea class="pit-local-qa-input" rows="1" placeholder="问问你的本地 Markdown 笔记，Enter 发送"></textarea><button class="pit-reader-primary pit-panel-local-qa-ask" type="button">提问</button></div>',
     '</div>',
     '<div class="pit-reader-panel-section" data-reader-panel="tweet">',
     '<label class="pit-reader-field"><span>想表达的内容</span><textarea class="pit-tweet-source" rows="7" placeholder="输入任意语言，写下你想表达的意思"></textarea></label>',
@@ -873,12 +1197,14 @@ function openAskPanel(settings = {}, options = {}) {
     '<div class="pit-reader-actions"><button class="pit-reader-primary pit-tweet-generate" type="button">生成 Twitter 文案</button><button class="pit-reader-secondary pit-tweet-copy" type="button" disabled>复制结果</button></div>',
     '<div class="pit-tweet-result" aria-live="polite">生成后会显示在这里。</div>',
     '</div>',
-    '<div class="pit-reader-panel-section" data-reader-panel="notes">',
-    '<div class="pit-reader-field pit-note-field"><span>我的笔记 · Markdown</span><div class="pit-note-editor"><textarea class="pit-panel-note" rows="10" spellcheck="false" placeholder="支持 Markdown：# 标题、- 要点、**重点**、`代码`、[链接](url)"></textarea><div class="pit-note-render markdown-body" hidden></div></div></div>',
-    '<div class="pit-reader-checks"><label><input class="pit-save-url" type="checkbox" checked> 原始链接</label><label><input class="pit-save-original" type="checkbox" checked> 网页英文</label><label><input class="pit-save-translation" type="checkbox" checked> 中文翻译</label><label><input class="pit-save-ask" type="checkbox" checked> Ask 内容</label><label><input class="pit-save-note" type="checkbox" checked> 我的笔记</label></div>',
-    '</div>',
     '<div class="pit-reader-panel-section" data-reader-panel="settings">',
-    '<label class="pit-reader-field"><span>翻译后端</span><select class="pit-panel-provider"><option value="ollama">本地 Ollama</option><option value="openaiCompatible">OpenAI-compatible API</option></select></label>',
+    '<h2 class="pit-reader-section-title">翻译设置</h2>',
+    '<label class="pit-reader-field"><span>翻译模式</span><select class="pit-panel-mode"><option value="append">段落下方增加中文</option><option value="replace">替换原文</option></select></label>',
+    '<label class="pit-reader-field"><span>译文样式</span><select class="pit-panel-style"><option value="none">无</option><option value="bar">左侧竖线</option><option value="dashed-box">虚线方框</option><option value="highlight">浅色高亮</option><option value="top-line">顶部细线</option><option value="bubble">圆角气泡</option></select></label>',
+    '<label class="pit-reader-toggle"><input class="pit-panel-short-replace" type="checkbox"> 短句自动替换原文</label>',
+    '<div class="pit-reader-actions pit-reader-settings-action"><button class="pit-reader-secondary pit-panel-restore" type="button">恢复原文</button></div>',
+    '<h2 class="pit-reader-section-title">模型与阅读</h2>',
+    '<label class="pit-reader-field"><span>翻译后端</span><select class="pit-panel-provider"><option value="ollama">本地 Ollama</option><option value="openaiCompatible">OpenAI-compatible API</option><option value="antLing">蚂蚁百灵 AI</option></select></label>',
     '<label class="pit-reader-field"><span>模型</span><select class="pit-panel-model-select"></select><input class="pit-panel-model-input" placeholder="qwen3.5:4b"></label>',
     '<label class="pit-reader-field"><span>API Base URL</span><input class="pit-panel-base-url" placeholder="http://localhost:11434"></label>',
     '<label class="pit-reader-field"><span>API Key</span><input class="pit-panel-api-key" type="password" placeholder="仅在线 API 需要"></label>',
@@ -890,6 +1216,7 @@ function openAskPanel(settings = {}, options = {}) {
     '<label class="pit-reader-field"><span>深色网页标记色</span><input class="pit-panel-mark-color-dark" type="color"></label>',
     '</div>',
     '<label class="pit-reader-toggle"><input class="pit-panel-auto-open" type="checkbox"> 打开网页后自动显示面板</label>',
+    '<label class="pit-reader-field"><span>总结注意点</span><textarea class="pit-panel-summary-prompt" rows="4" placeholder="例如：重点关注市场观点、风险、作者给出的建议。"></textarea></label>',
     '<label class="pit-reader-field"><span>Markdown 保存目录</span><input class="pit-panel-save-dir" placeholder="WebNotes"><small class="pit-reader-help">只能填写 Chrome 下载目录下的子文件夹，例如 WebNotes，不能填写 /Users/... 绝对路径。</small></label>',
     '</div>',
     '</section>',
@@ -909,12 +1236,13 @@ function openAskPanel(settings = {}, options = {}) {
   ].join("");
 
   document.body.appendChild(panel);
+  normalizeReaderPanelSingleton(panel);
   hydrateReaderPanel(panel, resolvedSettings);
   applySavedPanelSize(panel).finally(() => makePanelMovableAndResizable(panel));
   isolatePanelScroll(panel);
   prewarmPanelModel(panel);
   if (options.focus !== false) {
-    focusWithoutPageScroll(panel.querySelector(".pit-panel-translate"));
+    focusWithoutPageScroll(panel.querySelector(".pit-panel-note"));
   }
   return panel;
 }
@@ -940,6 +1268,10 @@ function hydrateReaderPanel(panel, settings) {
   panel.querySelector(".pit-panel-mark-color-dark").value = getStoredMarkColor(initial, "dark");
   panel.querySelector(".pit-panel-auto-open").checked = initial.autoOpenPanel !== false;
   panel.querySelector(".pit-panel-save-dir").value = initial.saveDir || "page-notes";
+  panel.querySelector(".pit-panel-summary-prompt").value = initial.summaryPrompt || "";
+  panel.querySelector(".pit-panel-allow-web-search").checked = initial.allowWebSearch !== false;
+  panel.querySelector(".pit-panel-local-qa-url").value = initial.localQaUrl || DEFAULT_OLLAMA.localQaUrl;
+  panel.querySelector(".pit-panel-local-qa-dir").value = initial.localQaNotesDir || "";
   updateTypographyLabels(panel);
 
   close.addEventListener("click", () => { panel.remove(); });
@@ -954,7 +1286,9 @@ function hydrateReaderPanel(panel, settings) {
 
   const noteInput = panel.querySelector(".pit-panel-note");
   const noteRender = panel.querySelector(".pit-note-render");
-  restoreNoteDraft(panel);
+  // Keep the restoration promise on the panel. A command shortcut can create a
+  // hidden panel and request a save before storage has returned the draft.
+  panel.__pitDraftRestorePromise = restoreNoteDraft(panel);
   noteInput.addEventListener("input", () => persistNoteDraft(panel));
   noteInput.addEventListener("focus", () => ensureManualNotePrefix(panel));
   noteInput.addEventListener("keydown", handleMarkdownNoteKeydown);
@@ -985,7 +1319,11 @@ function hydrateReaderPanel(panel, settings) {
     ".pit-panel-mark-color-light",
     ".pit-panel-mark-color-dark",
     ".pit-panel-auto-open",
-    ".pit-panel-save-dir"
+    ".pit-panel-save-dir",
+    ".pit-panel-summary-prompt",
+    ".pit-panel-allow-web-search",
+    ".pit-panel-local-qa-url",
+    ".pit-panel-local-qa-dir"
   ].join(",")).forEach((control) => {
     const update = () => {
       panel.__pitSettings = readPanelSettings(panel);
@@ -998,8 +1336,21 @@ function hydrateReaderPanel(panel, settings) {
       }
       persistPanelSettings(panel.__pitSettings);
     };
-    control.addEventListener("input", update);
+    control.addEventListener("input", () => {
+      if (!control.matches(".pit-panel-provider")) update();
+    });
     control.addEventListener("change", () => {
+      if (control.matches(".pit-panel-provider")) {
+        const previous = panel.__pitSettings;
+        const configs = { ...previous.providerConfigs };
+        configs[previous.provider] = { baseUrl: previous.baseUrl, model: previous.model, apiKey: previous.apiKey || "" };
+        const config = configs[control.value] || { ...getPanelProviderDefaults(control.value), apiKey: "" };
+        panel.querySelector(".pit-panel-base-url").value = config.baseUrl;
+        panel.querySelector(".pit-panel-model-input").value = config.model;
+        replaceSelectOptions(panel.querySelector(".pit-panel-model-select"), [{ value: config.model, label: config.model }]);
+        panel.querySelector(".pit-panel-api-key").value = config.apiKey || "";
+        panel.__pitSettings = { ...previous, ...config, provider: control.value, providerConfigs: configs };
+      }
       update();
       if (control.matches(".pit-panel-provider, .pit-panel-base-url")) updatePanelModelFields(panel);
     });
@@ -1017,10 +1368,32 @@ function hydrateReaderPanel(panel, settings) {
     }
   });
 
+  panel.querySelector(".pit-panel-mark-selection").addEventListener("click", async () => {
+    try {
+      const marked = await markSelectedTranslationText("", readPanelSettings(panel));
+      setPanelStatus(panel, marked
+        ? "已标记选中内容，并已发送到笔记草稿。"
+        : "请先在网页中选中要标记的内容，再点击“标记”。");
+    } catch (error) {
+      setPanelStatus(panel, error?.message || "标记失败，请重新选择文本后再试。");
+    }
+  });
+
   panel.querySelector(".pit-panel-restore").addEventListener("click", () => {
     if (window.__pitRun__) cancelRun(window.__pitRun__);
     restorePage();
     setPanelStatus(panel, "已恢复原文。");
+  });
+
+  panel.querySelector(".pit-panel-local-qa-open").addEventListener("click", () => openPanelLocalQa(panel));
+  panel.querySelector(".pit-panel-local-qa-pick").addEventListener("click", () => pickPanelLocalQaDirectory(panel));
+  panel.querySelector(".pit-panel-local-qa-index").addEventListener("click", () => reindexPanelLocalQa(panel));
+  panel.querySelector(".pit-panel-local-qa-ask").addEventListener("click", () => askPanelLocalNotes(panel));
+  panel.querySelector(".pit-local-qa-input").addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      askPanelLocalNotes(panel);
+    }
   });
 
   const saveAllButton = panel.querySelector(".pit-panel-save-all");
@@ -1050,7 +1423,10 @@ function applyExternalSettingsToPanel(panel, settings = {}) {
     [".pit-panel-mark-style", next.markStyle || DEFAULT_OLLAMA.markStyle],
     [".pit-panel-mark-color-light", getStoredMarkColor(next, "light")],
     [".pit-panel-mark-color-dark", getStoredMarkColor(next, "dark")],
-    [".pit-panel-save-dir", next.saveDir || "page-notes"]
+    [".pit-panel-save-dir", next.saveDir || "page-notes"],
+    [".pit-panel-summary-prompt", next.summaryPrompt || ""],
+    [".pit-panel-local-qa-url", next.localQaUrl || DEFAULT_OLLAMA.localQaUrl],
+    [".pit-panel-local-qa-dir", next.localQaNotesDir || ""]
   ];
 
   for (const [selector, value] of assignments) {
@@ -1062,6 +1438,8 @@ function applyExternalSettingsToPanel(panel, settings = {}) {
   if (shortReplace) shortReplace.checked = Boolean(next.shortTextReplaceMode);
   const autoOpen = panel.querySelector(".pit-panel-auto-open");
   if (autoOpen) autoOpen.checked = next.autoOpenPanel !== false;
+  const allowWebSearch = panel.querySelector(".pit-panel-allow-web-search");
+  if (allowWebSearch) allowWebSearch.checked = next.allowWebSearch !== false;
 
   updateTypographyLabels(panel);
   applyMarkColorToPage(next);
@@ -1123,8 +1501,120 @@ async function summarizePageForPopup(settings = {}) {
   return { summary, message: "已生成总结，标题正在准备。" };
 }
 
+function normalizePanelLocalQaUrl(value) {
+  return (String(value || DEFAULT_OLLAMA.localQaUrl).trim() || DEFAULT_OLLAMA.localQaUrl).replace(/\/+$/, "");
+}
+
+function setPanelLocalQaStatus(panel, text) {
+  const status = panel.querySelector(".pit-local-qa-status");
+  if (status) status.textContent = text;
+}
+
+async function panelLocalQaRequest(panel, path, options = {}) {
+  const response = await fetch(`${normalizePanelLocalQaUrl(panel.querySelector(".pit-panel-local-qa-url")?.value)}${path}`, {
+    headers: { "Content-Type": "application/json" },
+    ...options
+  });
+  const data = await response.json();
+  if (!response.ok || !data.ok) throw new Error(data.error || "本地问答服务请求失败。");
+  return data;
+}
+
+async function persistPanelLocalQaConfig(panel) {
+  const settings = readPanelSettings(panel);
+  persistPanelSettings(settings);
+  await panelLocalQaRequest(panel, "/api/config", {
+    method: "POST",
+    body: JSON.stringify({
+      notesDir: settings.localQaNotesDir,
+      provider: settings.provider === "antLing" ? "openaiCompatible" : settings.provider,
+      baseUrl: settings.baseUrl,
+      model: settings.model,
+      apiKey: settings.apiKey
+    })
+  });
+}
+
+async function openPanelLocalQa(panel) {
+  const url = normalizePanelLocalQaUrl(panel.querySelector(".pit-panel-local-qa-url")?.value);
+  window.open(url, "_blank", "noopener");
+}
+
+async function pickPanelLocalQaDirectory(panel) {
+  setPanelLocalQaStatus(panel, "正在打开目录选择器...");
+  try {
+    const response = await panelLocalQaRequest(panel, "/api/pick-directory", { method: "POST", body: "{}" });
+    if (response.cancelled) {
+      setPanelLocalQaStatus(panel, "已取消选择。");
+      return;
+    }
+    panel.querySelector(".pit-panel-local-qa-dir").value = response.path || "";
+    await persistPanelLocalQaConfig(panel);
+    await reindexPanelLocalQa(panel);
+  } catch (error) {
+    setPanelLocalQaStatus(panel, error?.message || String(error));
+  }
+}
+
+async function reindexPanelLocalQa(panel) {
+  setPanelLocalQaStatus(panel, "正在更新本地笔记索引...");
+  try {
+    await persistPanelLocalQaConfig(panel);
+    const response = await panelLocalQaRequest(panel, "/api/index", { method: "POST", body: "{}" });
+    const index = response.index || {};
+    setPanelLocalQaStatus(panel, `已索引 ${index.fileCount || 0} 个文件、${index.chunkCount || 0} 个片段。`);
+  } catch (error) {
+    setPanelLocalQaStatus(panel, error?.message || String(error));
+  }
+}
+
+async function askPanelLocalNotes(panel) {
+  const input = panel.querySelector(".pit-local-qa-input");
+  const question = input?.value.trim();
+  if (!question) return;
+  appendPanelLocalQaMessage(panel, "user", question);
+  input.value = "";
+  const pending = appendPanelLocalQaMessage(panel, "assistant", "正在检索本地笔记...");
+  try {
+    await persistPanelLocalQaConfig(panel);
+    const response = await panelLocalQaRequest(panel, "/api/ask", { method: "POST", body: JSON.stringify({ question }) });
+    pending.querySelector(".pit-local-qa-message-body").innerHTML = renderMiniMarkdown(formatPanelLocalQaAnswer(panel, response.answer, response.sources));
+    setPanelStatus(panel, "已基于本地笔记回答。");
+  } catch (error) {
+    pending.querySelector(".pit-local-qa-message-body").textContent = error?.message || String(error);
+    setPanelLocalQaStatus(panel, error?.message || String(error));
+  }
+}
+
+function appendPanelLocalQaMessage(panel, role, text) {
+  const messages = panel.querySelector(".pit-local-qa-messages");
+  const node = document.createElement("div");
+  node.className = `pit-local-qa-message is-${role}`;
+  node.innerHTML = `<div class="pit-ask-message-label">${role === "user" ? "你" : "笔记助手"}</div><div class="pit-local-qa-message-body markdown-body">${role === "assistant" ? renderMiniMarkdown(text) : escapeHtml(text)}</div>`;
+  messages.appendChild(node);
+  messages.scrollTop = messages.scrollHeight;
+  return node;
+}
+
+function formatPanelLocalQaAnswer(panel, answer, sources = []) {
+  const baseUrl = normalizePanelLocalQaUrl(panel.querySelector(".pit-panel-local-qa-url")?.value);
+  const sourceLines = (sources || []).slice(0, 6).map((source) => {
+    const label = `${source.relativePath || source.file} · ${source.title || ""}`.trim();
+    const link = source.sourceUrl ? `[${label}](${baseUrl}${source.sourceUrl})` : label;
+    return `- ${link} · 材料时间：${source.sourceTime?.label || "未知"}`;
+  }).join("\n");
+  return sourceLines ? `${answer || "没有得到回答。"}\n\n来源\n${sourceLines}` : (answer || "没有得到回答。");
+}
+
+function getPanelProviderDefaults(provider) {
+  if (provider === "antLing") return { baseUrl: "https://api.ant-ling.com/v1", model: "Ling-3.0-flash" };
+  if (provider === "openaiCompatible") return { baseUrl: "https://api.groq.com/openai/v1", model: "llama-3.1-8b-instant" };
+  return { baseUrl: DEFAULT_OLLAMA.baseUrl, model: DEFAULT_OLLAMA.model };
+}
+
 function readPanelSettings(panel) {
   const provider = panel.querySelector(".pit-panel-provider")?.value || "ollama";
+  const defaults = getPanelProviderDefaults(provider);
   const selectedModel = provider === "ollama"
     ? panel.querySelector(".pit-panel-model-select")?.value
     : panel.querySelector(".pit-panel-model-input")?.value;
@@ -1138,14 +1628,21 @@ function readPanelSettings(panel) {
     markHighlightColorDark: normalizeColor(panel.querySelector(".pit-panel-mark-color-dark")?.value, DEFAULT_OLLAMA.markHighlightColorDark),
     noteSaveShortcut: "auto",
     provider,
-    model: selectedModel?.trim() || DEFAULT_OLLAMA.model,
-    baseUrl: panel.querySelector(".pit-panel-base-url")?.value.trim() || DEFAULT_OLLAMA.baseUrl,
+    model: selectedModel?.trim() || defaults.model,
+    baseUrl: panel.querySelector(".pit-panel-base-url")?.value.trim() || defaults.baseUrl,
     apiKey: panel.querySelector(".pit-panel-api-key")?.value.trim() || "",
     translationFontSize: normalizeFontSizePercent(panel.querySelector(".pit-panel-font-size")?.value),
     translationLineHeight: normalizeLineHeight(panel.querySelector(".pit-panel-line-height")?.value),
     autoOpenPanel: panel.querySelector(".pit-panel-auto-open")?.checked !== false,
     saveDir: panel.querySelector(".pit-panel-save-dir")?.value.trim() || "page-notes",
-    summaryPrompt: ""
+    summaryPrompt: panel.querySelector(".pit-panel-summary-prompt")?.value.trim() || "",
+    allowWebSearch: panel.querySelector(".pit-panel-allow-web-search")?.checked !== false,
+    localQaUrl: normalizePanelLocalQaUrl(panel.querySelector(".pit-panel-local-qa-url")?.value),
+    localQaNotesDir: panel.querySelector(".pit-panel-local-qa-dir")?.value.trim() || ""
+  };
+  settings.providerConfigs = {
+    ...settings.providerConfigs,
+    [provider]: { baseUrl: settings.baseUrl, model: settings.model, apiKey: settings.apiKey }
   };
   settings.markHighlightColor = getMarkHighlightColor(settings);
   panel.__pitSettings = settings;
@@ -1158,6 +1655,12 @@ async function updatePanelModelFields(panel) {
   const input = panel.querySelector(".pit-panel-model-input");
   const current = panel.__pitSettings?.model || input.value || DEFAULT_OLLAMA.model;
   const isOllama = provider === "ollama";
+  const defaults = getPanelProviderDefaults(provider);
+  panel.querySelector(".pit-panel-base-url").placeholder = defaults.baseUrl;
+  input.placeholder = defaults.model;
+  const apiKey = panel.querySelector(".pit-panel-api-key");
+  apiKey.closest("label").hidden = isOllama;
+  apiKey.placeholder = provider === "antLing" ? "填写百灵控制台创建的 API Key" : "仅在线 API 需要";
   select.hidden = !isOllama;
   input.hidden = isOllama;
   if (!isOllama) {
@@ -1333,10 +1836,17 @@ async function savePanelMarkdown(panel) {
       }
       return;
     }
+    // All save entry points (header button, unsaved-note prompt and extension
+    // shortcut) pass through here. Wait for the same draft before building the
+    // payload so a newly-created hidden panel cannot export an empty note.
+    const note = await getNoteMarkdownForSave(panel);
+    // Saving must stay on a fast, local path. Use a summary/title that was
+    // prepared earlier when available; the background has deterministic
+    // fallbacks and must not make the user wait for a model request here.
     const response = await sendRuntimeMessageWithTimeout({
       type: "SAVE_MARKDOWN_NOTE",
       page: getPageBundle(),
-      note: getNoteMarkdown(panel).trim(),
+      note,
       options: {
         provider: settings.provider,
         model: settings.model,
@@ -1552,7 +2062,7 @@ function clampNumber(value, min, max) {
 function showSelectionToolbar() {
   const selection = window.getSelection();
   const text = normalizeSelectedText(selection?.toString() || "");
-  if (!text || text.length < 2) {
+  if (!selection?.rangeCount || selection.isCollapsed || !text) {
     hideSelectionToolbar();
     return;
   }
@@ -1669,28 +2179,44 @@ async function translateSelectionText(text) {
   const run = { cancelled: false, controllers: new Set(), ports: new Set() };
   const renderer = createStreamRenderer(target, /[*_`\[\]]/.test(selected));
   const protection = protectInlineTokens(protectLinks(selected));
+  let completedTranslation = "";
 
   try {
     for (const textChunk of splitTextForTranslation(protection.text)) {
       if (textChunk.text) {
         if (isProtectedPlaceholderOnly(textChunk.text)) {
-          renderer.append(restoreInlineTokens(textChunk.text, protection));
+          const restoredChunk = restoreInlineTokens(textChunk.text, protection);
+          renderer.append(restoredChunk);
+          completedTranslation += restoredChunk;
         } else {
-          await streamOneParagraph(textChunk.text, settings, (chunk) => {
+          const beforeChunk = renderer.getText();
+          const completedChunk = await streamOneParagraph(textChunk.text, settings, (chunk) => {
             renderer.append(restoreInlineTokens(chunk, protection));
           }, run);
+          const restoredCompletedChunk = restoreInlineTokens(completedChunk, protection);
+          appendMissingStreamResult(renderer, beforeChunk, restoredCompletedChunk);
+          completedTranslation += restoredCompletedChunk;
         }
       }
       if (textChunk.separator) {
         renderer.append(textChunk.separator);
+        completedTranslation += textChunk.separator;
       }
     }
-    const finalText = restoreInlineTokens(renderer.getText(), protection);
+    const finalText = formatTranslationResult(completedTranslation || restoreInlineTokens(renderer.getText(), protection));
+    if (!isUsableTranslationResult(selected, finalText)) {
+      throw new Error("模型没有返回有效的中文译文");
+    }
     target.dataset.state = "done";
     renderer.finish(finalText);
   } catch (error) {
     target.dataset.state = "error";
-    renderer.finish(renderer.getText() || humanizeStreamError(error, settings));
+    const partialText = renderer.getText();
+    renderer.finish(
+      partialText && !hasUnresolvedProtectedPlaceholder(partialText)
+        ? partialText
+        : humanizeStreamError(error, settings)
+    );
   } finally {
     run.ports?.forEach((port) => port.disconnect());
     run.ports?.clear();
@@ -1796,10 +2322,46 @@ function appendMarkedTextToNote(text, settings = undefined) {
   return appendMarkdownLineToNote(formatMarkedTextMarkdown(selected), settings, "已标记并发送到笔记，草稿已自动保存。");
 }
 
+function hasHoverNoteContent(composer) {
+  return Boolean(composer?.dataset.savedNote
+    || normalizeHoverNoteMarkdown(composer?.querySelector(".pit-mark-note-input")?.value || ""));
+}
+
+function syncHoverNoteAddTriggers(node) {
+  const target = hoverNoteCommandPressed ? getHoverNoteTarget(node) : null;
+  const activeComposer = hoverNoteCommandPressed ? node?.closest?.(".pit-mark-note-composer") : null;
+  hoverNoteComposers.forEach((composer, candidate) => {
+    composer.classList.toggle("is-add-trigger-enabled", candidate === target || composer === activeComposer);
+  });
+  if (!target) cancelHoverNoteShow();
+  return target;
+}
+
+function handleHoverNoteModifierChange(event) {
+  const wasPressed = hoverNoteCommandPressed;
+  hoverNoteCommandPressed = event.metaKey;
+  if (wasPressed === hoverNoteCommandPressed) return;
+  const node = hasHoverNotePointer
+    ? document.elementFromPoint(lastMousePoint.x, lastMousePoint.y)
+    : null;
+  syncHoverNoteAddTriggers(node);
+  if (hoverNoteCommandPressed && node) {
+    handleHoverNotePointerOver({ target: node, metaKey: true });
+  }
+}
+
 function handleHoverNotePointerOver(event) {
   if (event.pointerType === "touch") return;
+  if (Number.isFinite(event.clientX) && Number.isFinite(event.clientY)) {
+    lastMousePoint = { x: event.clientX, y: event.clientY };
+    hasHoverNotePointer = true;
+  }
+  hoverNoteCommandPressed = Boolean(event.metaKey);
+  syncHoverNoteAddTriggers(event.target);
   const composerUnderPointer = event.target?.closest?.(".pit-mark-note-composer");
   if (composerUnderPointer) {
+    if (!hoverNoteCommandPressed && !hasHoverNoteContent(composerUnderPointer)
+      && !composerUnderPointer.matches(":focus-within")) return;
     cancelHoverNoteHide();
     activateHoverNoteHotZone(composerUnderPointer);
     return;
@@ -1812,6 +2374,7 @@ function handleHoverNotePointerOver(event) {
   }
   cancelHoverNoteHide();
   const savedComposer = hoverNoteComposers.get(target);
+  if (!hoverNoteCommandPressed && !hasHoverNoteContent(savedComposer)) return;
   if (savedComposer?.isConnected) {
     cancelHoverNoteShow();
     hoverNoteTarget = target;
@@ -1837,6 +2400,8 @@ function handleHoverNotePointerOver(event) {
 
 function handleHoverNotePointerOut(event) {
   if (event.pointerType === "touch") return;
+  hoverNoteCommandPressed = Boolean(event.metaKey);
+  syncHoverNoteAddTriggers(event.relatedTarget);
   const fromTarget = getHoverNoteTarget(event.target);
   if (!fromTarget && !event.target?.closest?.(".pit-mark-note-composer")) return;
   const next = event.relatedTarget instanceof Element ? event.relatedTarget : null;
@@ -1847,7 +2412,6 @@ function handleHoverNotePointerOut(event) {
     composer?.classList.add("is-target-hovered");
     return;
   }
-  composer?.classList.remove("is-target-hovered");
   cancelHoverNoteShow();
   scheduleHoverNoteHide();
 }
@@ -1875,7 +2439,7 @@ function getHoverNoteTarget(node) {
   const target = semanticTarget || findNearestReadableHoverBlock(element);
   if (!(target instanceof HTMLElement) || !isVisible(target)) return null;
   const text = normalizeSelectedText(target.innerText || target.textContent || "");
-  if (Array.from(text).length <= 18) return null;
+  if (!text) return null;
   return target;
 }
 
@@ -1895,6 +2459,7 @@ function findNearestReadableHoverBlock(element) {
 
 function showHoverNoteComposer(target) {
   cancelHoverNoteShow();
+  if (!hoverNoteCommandPressed || !target.matches(":hover")) return;
   if (hoverNoteComposer && hoverNoteComposer !== hoverNoteComposers.get(target)) {
     dismissHoverNoteComposer(hoverNoteComposer);
   }
@@ -1915,6 +2480,7 @@ function showHoverNoteComposer(target) {
     hoverNoteComposer.dataset.selectedText = getSelectedTextForNoteTarget(target);
   }
   hoverNoteComposer.hidden = false;
+  hoverNoteComposer.classList.add("is-add-trigger-enabled");
   hoverNoteComposer.classList.remove("is-visible", "is-hiding");
   if (created) hoverNoteComposer.classList.remove("is-closed");
   hoverNoteComposer.classList.add("is-target-hovered");
@@ -1933,9 +2499,9 @@ function scheduleHoverNoteShow(target) {
   hoverNoteTarget = target;
   hoverNoteShowTimer = setTimeout(() => {
     hoverNoteShowTimer = null;
-    if (hoverNoteTarget !== target || !target.matches(":hover")) return;
+    if (!hoverNoteCommandPressed || hoverNoteTarget !== target || !target.matches(":hover")) return;
     showHoverNoteComposer(target);
-  }, 100);
+  }, HOVER_NOTE_SHOW_DELAY_MS);
 }
 
 function cancelHoverNoteShow() {
@@ -2067,7 +2633,7 @@ function createHoverNoteComposer(target, settings = undefined) {
   });
   composer.addEventListener("mouseleave", () => {
     if (composer.classList.contains("is-dragging")) return;
-    dismissHoverNoteComposer(composer, settings);
+    scheduleHoverNoteHide();
   });
   composer.addEventListener("focusin", () => {
     cancelHoverNoteHide();
@@ -2097,9 +2663,17 @@ function activateHoverNoteHotZone(composer) {
 function scheduleHoverNoteHide() {
   cancelHoverNoteHide();
   hoverNoteHideTimer = setTimeout(() => {
-    if (hoverNoteComposer?.matches(":hover, :focus-within")) return;
+    if (hoverNoteComposer?.matches(":hover, :focus-within")) {
+      cancelHoverNoteHide();
+      return;
+    }
+    const target = hoverNoteComposer ? findHoverNoteTargetForComposer(hoverNoteComposer) : hoverNoteTarget;
+    if (target?.matches?.(":hover")) {
+      cancelHoverNoteHide();
+      return;
+    }
     removeHoverNoteComposer();
-  }, 650);
+  }, HOVER_NOTE_HIDE_DELAY_MS);
 }
 
 function dismissHoverNoteComposer(composer, settings = undefined) {
@@ -2411,7 +2985,10 @@ function appendHoverNoteToPanel(note, selectedText, settings = undefined, oldNot
   const input = panel.querySelector(".pit-panel-note");
   if (!input) return null;
   panel.dataset.appendingSelection = "true";
-  editNoteMarkdown(panel);
+  // Adding a note from the page must not steal keyboard focus from the page.
+  // The panel can be hidden here, so focusing its textarea would redirect
+  // subsequent copy/paste shortcuts away from the webpage.
+  editNoteMarkdown(panel, { focus: false });
   panel.dataset.appendingSelection = "false";
   const result = insertHoverNote(input.value, selection, value, oldNote);
   input.value = result.markdown;
@@ -2420,7 +2997,6 @@ function appendHoverNoteToPanel(note, selectedText, settings = undefined, oldNot
   scrollNotesAreaToBottom(panel);
   persistNoteDraft(panel);
   prepareOriginalSummary(settings);
-  requestNoteCleaning(panel, settings, { silent: true });
   restorePageScrollPosition(scrollPosition);
   showPanelReceiveFeedback(panel, input);
   return { panel, input };
@@ -2549,7 +3125,9 @@ function appendMarkdownLineToNote(markdown, settings = undefined, status = "已�
   activateReaderTab(panel, "notes");
   const input = panel.querySelector(".pit-panel-note");
   panel.dataset.appendingSelection = "true";
-  editNoteMarkdown(panel);
+  // Marking text also appends an automatic note. Keep the page focused so
+  // normal Ctrl/Cmd+C and Ctrl/Cmd+V continue to target the webpage.
+  editNoteMarkdown(panel, { focus: false });
   panel.dataset.appendingSelection = "false";
   const insertion = `${input.value.trim() ? "\n\n" : ""}${value}\n`;
   const start = input.value.length;
@@ -2558,10 +3136,8 @@ function appendMarkdownLineToNote(markdown, settings = undefined, status = "已�
   input.selectionStart = input.selectionEnd = start + insertion.length;
   input.scrollTop = input.scrollHeight;
   scrollNotesAreaToBottom(panel);
-  focusWithoutPageScroll(input);
   persistNoteDraft(panel);
   prepareOriginalSummary(settings);
-  requestNoteCleaning(panel, settings, { silent: true });
   hideSelectionToolbar();
   restorePageScrollPosition(scrollPosition);
   return { panel, input };
@@ -2733,6 +3309,7 @@ function persistPanelSettings(settings) {
   if (!store?.set) return;
   store.set({
     provider: settings.provider,
+    providerConfigs: settings.providerConfigs,
     mode: settings.mode,
     translationStyle: settings.translationStyle,
     shortTextReplaceMode: settings.shortTextReplaceMode,
@@ -2747,7 +3324,11 @@ function persistPanelSettings(settings) {
     translationFontSize: settings.translationFontSize,
     translationLineHeight: settings.translationLineHeight,
     autoOpenPanel: settings.autoOpenPanel,
-    saveDir: settings.saveDir
+    saveDir: settings.saveDir,
+    summaryPrompt: settings.summaryPrompt,
+    allowWebSearch: settings.allowWebSearch,
+    localQaUrl: settings.localQaUrl,
+    localQaNotesDir: settings.localQaNotesDir
   }).catch(() => {
     // 页面内面板的设置保存失败不影响当前页面操作。
   });
@@ -2812,6 +3393,14 @@ function getNoteMarkdown(panel) {
   return panel.querySelector(".pit-panel-note")?.value || "";
 }
 
+async function getNoteMarkdownForSave(panel) {
+  // restoreNoteDraft is deliberately non-blocking for panel rendering, but a
+  // save must not race it. Awaiting the per-panel promise also makes the three
+  // save routes consume exactly the same source of truth.
+  await panel?.__pitDraftRestorePromise;
+  return getNoteMarkdown(panel).trim();
+}
+
 function ensureManualNotePrefix(panel) {
   if (panel.dataset.appendingSelection === "true") return;
   const input = panel.querySelector(".pit-panel-note");
@@ -2830,8 +3419,9 @@ async function restoreNoteDraft(panel) {
     const draft = keys.map((key) => stored[key]).find(Boolean);
     if (draft && !input.value) {
       input.value = draft;
-      updateUnsavedNotePrompt(true);
-      setPanelStatus(panel, "已恢复未保存的笔记草稿。");
+      const hasUnsavedContent = hasMeaningfulNoteContent(draft);
+      updateUnsavedNotePrompt(hasUnsavedContent);
+      if (hasUnsavedContent) setPanelStatus(panel, "已恢复未保存的笔记草稿。");
     }
   } catch {
     // 草稿恢复失败不影响正常使用。
@@ -2841,11 +3431,19 @@ async function restoreNoteDraft(panel) {
 function persistNoteDraft(panel) {
   const note = getNoteMarkdown(panel);
   const entries = Object.fromEntries(getNoteDraftKeys().map((key) => [key, note]));
-  updateUnsavedNotePrompt(Boolean(note.trim()));
+  updateUnsavedNotePrompt(hasMeaningfulNoteContent(note));
   if (!chrome.storage?.local?.set) return;
   chrome.storage.local.set(entries).catch(() => {
     // 自动草稿失败时不打断编辑。
   });
+}
+
+function hasMeaningfulNoteContent(note) {
+  const value = String(note || "").trim();
+  if (!value) return false;
+  // Focusing an empty editor inserts a Markdown heading prefix for convenience.
+  // That prefix is an editor placeholder, not a written note or a page mark.
+  return !/^#{1,6}$/.test(value);
 }
 
 function clearNoteDraft(panel) {
@@ -2945,13 +3543,13 @@ function renderNoteMarkdown(panel) {
   render.hidden = false;
 }
 
-function editNoteMarkdown(panel) {
+function editNoteMarkdown(panel, { focus = true } = {}) {
   const input = panel.querySelector(".pit-panel-note");
   const render = panel.querySelector(".pit-note-render");
   if (!input || !render) return;
   render.hidden = true;
   input.hidden = false;
-  focusWithoutPageScroll(input);
+  if (focus) focusWithoutPageScroll(input);
 }
 
 function escapeMarkdownInline(text) {
@@ -3150,7 +3748,7 @@ async function sendPanelQuestion(panel) {
       type: "ASK_ARTICLE",
       page: getPageBundle(),
       question,
-      allowWebSearch: true,
+      allowWebSearch: readPanelSettings(panel).allowWebSearch,
       settings: readPanelSettings(panel)
     });
     if (!response?.ok) throw new Error(response?.error || "回答失败。");
@@ -3529,13 +4127,14 @@ function htmlToMarkdown(html) {
 }
 
 function markdownToHtml(md) {
-  return md
+  return formatTranslationResult(md)
     .replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>")
     .replace(/\*(.*?)\*/g,     "<em>$1</em>")
     .replace(/_(.*?)_/g,       "<u>$1</u>")
     .replace(/`(.*?)`/g,       "<code>$1</code>")
     .replace(/\[(.*?)\]\((.*?)\)/g, '<a href="$2" target="_blank">$1</a>')
-    .replace(/\n/g, "<br>");
+    .replace(/\n+/g, "<br>")
+    .replace(/(?:<br\s*\/?>\s*){2,}/gi, "<br>");
 }
 
 // ─── 段落收集 ─────────────────────────────────────────────────
@@ -3637,8 +4236,21 @@ function isAlreadyHandledBlock(el) {
 function removeOverlappingCandidateBlocks(elements) {
   const candidateSet = new Set(elements);
   return elements.filter((el) => {
+    const atomicAncestor = elements.find((parent) => (
+      parent !== el
+      && candidateSet.has(parent)
+      && parent.contains(el)
+      && isAtomicTranslationBlock(parent)
+    ));
+    if (atomicAncestor) return false;
+
     const descendants = elements.filter((child) => child !== el && candidateSet.has(child) && el.contains(child));
     if (!descendants.length) return true;
+
+    // 正文段落优先于 article/main/section 等外层容器，避免外层替换时把尚未
+    // 翻译的内部段落一起移出 DOM。反过来，p/li 等原子段落优先于内部 span。
+    if (isAtomicTranslationBlock(el)) return true;
+    if (descendants.some((child) => isAtomicTranslationBlock(child))) return false;
 
     const parentText = normalizeText(el.innerText);
     if (!parentText) return false;
@@ -3651,6 +4263,11 @@ function removeOverlappingCandidateBlocks(elements) {
     if (!descendantText) return true;
     return getTextCoverage(descendantText, parentText) < 0.98;
   });
+}
+
+function isAtomicTranslationBlock(element) {
+  return element instanceof Element
+    && /^(P|LI|BLOCKQUOTE|FIGCAPTION|DD|DT|TD|TH|H[1-6])$/.test(element.tagName);
 }
 
 function getTextCoverage(partText, fullText) {
@@ -3977,10 +4594,11 @@ function isXPage() {
 
 // ─── 缓存 ────────────────────────────────────────────────────
 function getCacheEntry(text) {
-  return getSessionValue(CACHE_PREFIX + hashText(text));
+  const cached = getSessionValue(CACHE_PREFIX + hashText(text));
+  return cached ? formatTranslationResult(cached) : null;
 }
 function setCacheEntry(text, translation) {
-  setSessionValue(CACHE_PREFIX + hashText(text), translation);
+  setSessionValue(CACHE_PREFIX + hashText(text), formatTranslationResult(translation));
 }
 function getSessionValue(key) {
   try   { return sessionStorage.getItem(key) || null; }
@@ -4002,10 +4620,19 @@ function splitByCache(blocks) {
   const cached = [], uncached = [];
   for (const b of blocks) {
     const hit = getCacheEntry(b.text);
-    if (hit) cached.push({ block: b, translation: hit });
-    else     uncached.push(b);
+    if (hit && isUsableTranslationResult(b.text, hit)) {
+      cached.push({ block: b, translation: hit });
+    } else {
+      if (hit) removeSessionValue(CACHE_PREFIX + hashText(b.text));
+      uncached.push(b);
+    }
   }
   return { cachedBlocks: cached, uncachedBlocks: uncached };
+}
+
+function removeSessionValue(key) {
+  try { sessionStorage.removeItem(key); }
+  catch { /* 忽略不可用的 sessionStorage */ }
 }
 
 // ─── 文本工具 ────────────────────────────────────────────────
@@ -4020,6 +4647,19 @@ function normalizeTextPreserveBreaks(text) {
     .map((line) => line.replace(/[ \t]+/g, " ").trim())
     .join("\n")
     .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+// 统一收紧模型输出的排版：清理行尾空白并移除空白行。
+// 保留单个换行，避免破坏列表、诗句等仍需要逐行展示的内容。
+function formatTranslationResult(text) {
+  return stripStreamedText(text)
+    .replace(/\r\n?/g, "\n")
+    .replace(/[\u200B-\u200D\uFEFF]/g, "")
+    .split("\n")
+    .map((line) => line.replace(/[\t \u00A0]+$/g, ""))
+    .join("\n")
+    .replace(/\n(?:[\t \u00A0]*\n)+/g, "\n")
     .trim();
 }
 function shouldTranslateToSimplifiedChinese(text) {
@@ -4205,7 +4845,9 @@ function stripStreamedText(content) {
   let cleaned = String(content || "")
     .replace(/<think\b[^>]*>[\s\S]*?(?:<\/think>|$)/gi, "")
     .replace(/<thinking\b[^>]*>[\s\S]*?(?:<\/thinking>|$)/gi, "")
-    .replace(/^\s*(?:\/?no[_\s-]*think|<no[_\s-]*think\s*\/?>)\s*$/gim, "")
+    .replace(/^\s*(?:\/?\s*no[_\s-]*think(?:ing)?|<\s*no[_\s-]*think(?:ing)?\s*\/?>)\s*[.:：。,!！,，;；-]*\s*$/gim, "")
+    .replace(/^\s*(?:\/?\s*no[_\s-]*think(?:ing)?|<\s*no[_\s-]*think(?:ing)?\s*\/?>)\s*[.:：。,!！,，;；-]+\s*/i, "")
+    .replace(/^\s*\/?\s*no[_\s-]*think\s+(?=\S)/i, "")
     .replace(/```(?:json)?/gi, "")
     .replace(/```/g, "")
     .trim();
